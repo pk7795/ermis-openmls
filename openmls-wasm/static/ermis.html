@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chat Room</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/light.css" />
+  <style>
+    .chat-container {
+      width: 600px;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .status-bar {
+      display: flex;
+      justify-content: space-between;
+      padding: 10px;
+      border-bottom: 1px solid #ccc;
+    }
+
+    .messages {
+      flex: 1;
+      height: 300px;
+      overflow-y: auto;
+      border-bottom: 1px solid #ccc;
+      padding-bottom: 10px;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+    }
+
+    .message {
+      padding: 8px;
+      border-radius: 8px;
+      margin: 5px;
+      max-width: 70%;
+    }
+
+    .mine {
+      background-color: #dcf8c6;
+      align-self: flex-start;
+    }
+
+    .theirs {
+      background-color: #e0e0e0;
+      align-self: flex-end;
+    }
+
+    .input-container {
+      display: flex;
+      margin-top: 10px;
+    }
+
+    .input-container input {
+      flex: 1;
+      padding: 5px;
+    }
+
+    .input-container button {
+      margin-left: 5px;
+    }
+
+    .members {
+      width: 200px;
+      border-right: 1px solid #ccc;
+      padding-right: 10px;
+      background-color: #e9e9e9;
+      border-radius: 5px;
+      padding: 10px;
+    }
+
+    .groups-container {
+      margin-top: 20px;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+      background-color: #e9e9e9;
+    }
+
+    .groups-container h3 {
+      margin-top: 0;
+    }
+
+    .groups-container ul {
+      list-style-type: none;
+      padding: 0;
+    }
+
+    .groups-container ul li {
+      padding: 5px;
+      cursor: pointer;
+    }
+
+    .groups-container ul li:hover {
+      background-color: #ddd;
+    }
+
+    .button-container {
+      margin-bottom: 20px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .button-container button {
+      padding: 10px 20px;
+      background-color: #007bff;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+
+    .button-container button:hover {
+      background-color: #0056b3;
+    }
+  </style>
+  <script type="module">
+    import ErmisWorker from "./ermisWorker.js";
+
+    let GROUP_ID;
+    const BASE_URL = "http://127.0.0.1:5151";
+    const SUBSCRIBE_URL = `${BASE_URL}/subscribe`;
+    const SEND_MESSAGE_URL = `${BASE_URL}/send`;
+    const MEMBERS_URL = `${BASE_URL}/users`;
+    const FETCH_KEYPACKAGES_URL = `${BASE_URL}/mls/get_keypackages`;
+    const ADD_USERS_TO_ROOM_URL = `${BASE_URL}/add_user_to_room`;
+    const FETCH_GROUPS_URL = `${BASE_URL}/rooms`;
+    let CLIENTNAME;
+
+    async function initMls() {
+      console.log("Starting mls");
+      try {
+        CLIENTNAME = prompt("Enter your User Name:");
+        const CLIENT_ADDRESS = `${CLIENTNAME}-1234`;
+        const CLIENT_DB_URL = `${CLIENTNAME}-db`;
+        if (!!CLIENTNAME) {
+          // displayCurrentName();
+          setCurrentClient(CLIENTNAME);
+        }
+
+        const eventSource = new EventSource(
+          `${SUBSCRIBE_URL}?user_id=${CLIENTNAME}`
+        );
+        console.log("eventSource url", `SUBSCRIBE_URL?user_id=${CLIENTNAME}`);
+        eventSource.onmessage = handleServerMessage;
+
+        const { isIdentityExist } = await ErmisWorker.createClient(
+          CLIENT_DB_URL,
+          null,
+          CLIENTNAME,
+          CLIENTNAME,
+          BASE_URL
+        );
+        console.log(`Client ${CLIENTNAME} initialized!`);
+        // if (!isIdentityExist) {
+        await ErmisWorker.uploadKeypackage(CLIENTNAME);
+        console.log("Keypackage uploaded successfully.");
+        // } else {
+        //   console.log("Identity exist, skip uploadKeypackage");
+        // }
+      } catch (error) {
+        console.error("Error initializing MLS", error);
+      }
+    }
+
+    async function handleServerMessage(event) {
+      const data = JSON.parse(event.data);
+
+      if (data.mess_type === "EncryptGroupMessage") {
+        console.log(`Processing message from: ${data.from}`);
+        const decryptedMessage = await ErmisWorker.processIncomingMessage(
+          CLIENTNAME,
+          data.room_id,
+          data.message,
+          data.from
+        );
+        console.log(
+          "-------------decrypted message -----------",
+          decryptedMessage
+        );
+        displayMessage(data.from, decryptedMessage.decryptedMessage);
+      }
+
+      if (data.mess_type === "WelcomeMessage") {
+        try {
+          const processWelcomeMessageResult =
+            await ErmisWorker.processWelcomeMessage(
+              CLIENTNAME,
+              data.room_id,
+              data.message
+            );
+
+          const joinGroupByWelcomeResult =
+            await ErmisWorker.joinGroupByWelcome(CLIENTNAME, data.room_id);
+
+          // Set GROUP_ID to the room_id from the welcome message
+          // GROUP_ID = data.room_id;
+          // displayCurrentGroup();
+          setCurrentGroup(data.room_id);
+          await loadGroupMessages();
+        } catch (error) {
+          console.log("-------error---------", error);
+        }
+      }
+    }
+
+    async function sendEncryptMessageToServer(
+      room_id,
+      from,
+      to,
+      messType,
+      messValue
+    ) {
+      let message = Array.from(messValue);
+
+      const body = JSON.stringify({
+        room_id,
+        from,
+        to,
+        mess_type: messType,
+        message,
+      });
+
+      await fetch(SEND_MESSAGE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      });
+    }
+
+    async function createChatRoom() {
+      const memberNames = prompt("Enter member names (comma-separated):");
+      if (!memberNames) return;
+
+      const userIds = memberNames.split(",").map((name) => name.trim());
+
+      try {
+        const response = await fetch(FETCH_KEYPACKAGES_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_ids: userIds }),
+        });
+        const memberKeyPackages = await response.json();
+        const kpArray = Object.values(memberKeyPackages);
+        // const groupId = `group_${Date.now()}`;
+
+        const groupData = await ErmisWorker.createWithGroupIdAndMembers(
+          CLIENTNAME,
+          GROUP_ID,
+          kpArray
+        );
+        console.log("create group result:", groupData);
+
+        console.log("wecome message:", groupData.welcome);
+        const welcomeMessage = groupData.welcome;
+        await sendEncryptMessageToServer(
+          GROUP_ID,
+          CLIENTNAME,
+          userIds,
+          "WelcomeMessage",
+          welcomeMessage
+        );
+
+        // add user to server chat room (just for test)
+        const addUsersRes = await fetch(ADD_USERS_TO_ROOM_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            user_ids: [...userIds, CLIENTNAME],
+            room_id: GROUP_ID,
+          }),
+        });
+
+        console.log("Chat room created successfully.");
+      } catch (error) {
+        console.error("Error creating chat room", error);
+      }
+    }
+
+    async function addMembers() {
+      try {
+        const memberNames = prompt(
+          "Enter new member names (comma-separated):"
+        );
+        if (!memberNames) return;
+
+        const userIds = memberNames.split(",").map((name) => name.trim());
+
+        // Fetch key packages for new members
+        const response = await fetch(FETCH_KEYPACKAGES_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_ids: userIds }),
+        });
+
+        if (!response.ok) {
+          throw new Error("Failed to fetch key packages");
+        }
+
+        const memberKeyPackages = await response.json();
+        const kpArray = Object.values(memberKeyPackages);
+
+        // Call ErmisWorker to add members
+        const groupData = await ErmisWorker.addMembers(
+          CLIENTNAME,
+          GROUP_ID,
+          kpArray
+        );
+
+        const welcomeMessage = groupData.welcome;
+        const commitMessage = groupData.commit;
+        await sendEncryptMessageToServer(
+          GROUP_ID,
+          CLIENTNAME,
+          userIds,
+          "WelcomeMessage",
+          welcomeMessage
+        );
+
+        await sendEncryptMessageToServer(
+          GROUP_ID,
+          CLIENTNAME,
+          [""],
+          "EncryptGroupMessage",
+          commitMessage
+        );
+
+        const addUsersRes = await fetch(ADD_USERS_TO_ROOM_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            user_ids: [...userIds],
+            room_id: GROUP_ID,
+          }),
+        });
+
+        alert("Members added successfully!");
+      } catch (error) {
+        console.error("Error adding members:", error);
+        alert("Failed to add members!");
+      }
+    }
+
+    async function enterChatMessage() {
+      const input = document.getElementById("message-input");
+      const message = input.value.trim();
+      if (!message) return;
+      input.value = "";
+      displayMessage(CLIENTNAME, message);
+      const { encryptedMessage } = await ErmisWorker.encryptMessage(
+        CLIENTNAME,
+        GROUP_ID,
+        message
+      );
+      await sendEncryptMessageToServer(
+        GROUP_ID,
+        CLIENTNAME,
+        [""],
+        "EncryptGroupMessage",
+        encryptedMessage
+      );
+    }
+
+    async function loadGroupMessages() {
+      const messages = await ErmisWorker.getGroupMessages(
+        CLIENTNAME,
+        GROUP_ID
+      );
+      const messagesContainer = document.getElementById("messages");
+      messagesContainer.innerHTML = ""; // Clear existing messages
+      messages.forEach((msg) => {
+        displayMessage(msg.senderId, msg.text);
+      });
+    }
+
+    async function getGroupName() {
+      GROUP_ID = prompt("Enter a group ID:");
+      if (!GROUP_ID) return;
+      // displayCurrentGroup();
+      setCurrentGroup(GROUP_ID);
+      await loadGroupMessages();
+    }
+
+    async function getGroupMessages() {
+      const messages = await ErmisWorker.getGroupMessages(
+        CLIENTNAME,
+        GROUP_ID
+      );
+      console.log("group message", messages);
+    }
+
+    async function fetchRoomMembers() {
+      try {
+        const response = await fetch(MEMBERS_URL);
+        const members = await response.json();
+        displayRoomMembers(members);
+      } catch (error) {
+        console.error("Failed to fetch room members", error);
+      }
+    }
+
+    async function fetchGroups() {
+      try {
+        const response = await fetch(FETCH_GROUPS_URL);
+        const groups = await response.json();
+        displayGroups(groups);
+      } catch (error) {
+        console.error("Failed to fetch groups", error);
+      }
+    }
+
+    function setCurrentGroup(groupId) {
+      GROUP_ID = groupId;
+      document.getElementById(
+        "current_group"
+      ).textContent = `Room: ${GROUP_ID}`;
+    }
+    function setCurrentClient(clientName) {
+      CLIENTNAME = clientName;
+      document.getElementById(
+        "current_user"
+      ).textContent = `Current User: ${CLIENTNAME}`;
+    }
+
+    function displayGroups(groups) {
+      const groupsContainer = document.getElementById("groups");
+      groupsContainer.innerHTML = "<h3>Groups in Server</h3>";
+      const ul = document.createElement("ul");
+      groups.forEach((group) => {
+        const li = document.createElement("li");
+        li.textContent = group;
+        li.addEventListener("click", () => {
+          // GROUP_ID = group;
+          // displayCurrentGroup();
+          setCurrentGroup(group);
+          loadGroupMessages();
+        });
+        ul.appendChild(li);
+      });
+      groupsContainer.appendChild(ul);
+    }
+
+    function displayCurrentName() {
+      const currentUser = document.getElementById("current_user");
+      const msgElement = document.createElement("div");
+      msgElement.textContent = CLIENTNAME;
+      currentUser.appendChild(msgElement);
+    }
+
+    function displayCurrentGroup() {
+      const currentUser = document.getElementById("current_group");
+      const msgElement = document.createElement("div");
+      msgElement.textContent = GROUP_ID;
+      currentUser.appendChild(msgElement);
+    }
+
+    function displayRoomMembers(members) {
+      const membersContainer = document.getElementById("members");
+      membersContainer.innerHTML = "<h3>Room Members</h3>";
+      members.forEach((member) => {
+        const memberElement = document.createElement("div");
+        memberElement.textContent = member;
+        membersContainer.appendChild(memberElement);
+      });
+    }
+
+    // function displayMessage(user, message) {
+    //   const messages = document.getElementById("messages");
+    //   const msgElement = document.createElement("div");
+    //   msgElement.textContent = `${user}: ${message}`;
+    //   messages.appendChild(msgElement);
+    // }
+
+    function displayMessage(user, message) {
+      const messages = document.getElementById("messages");
+      const msgElement = document.createElement("div");
+      msgElement.textContent = `${user}: ${message}`;
+      msgElement.classList.add(
+        "message",
+        user === CLIENTNAME ? "mine" : "theirs"
+      );
+      messages.appendChild(msgElement);
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      document
+        .getElementById("send-btn")
+        .addEventListener("click", enterChatMessage);
+      document
+        .getElementById("message-input")
+        .addEventListener("keypress", (event) => {
+          if (event.key === "Enter") enterChatMessage();
+        });
+      document
+        .getElementById("fetch-members-btn")
+        .addEventListener("click", fetchRoomMembers);
+      document.getElementById("initMls").addEventListener("click", initMls);
+      document
+        .getElementById("createRoom")
+        .addEventListener("click", createChatRoom);
+      document
+        .getElementById("getMess")
+        .addEventListener("click", getGroupMessages);
+      document
+        .getElementById("groupName")
+        .addEventListener("click", getGroupName);
+      document
+        .getElementById("addMembers")
+        .addEventListener("click", addMembers);
+      document
+        .getElementById("fetch-groups-btn")
+        .addEventListener("click", fetchGroups);
+    });
+  </script>
+</head>
+
+<body>
+  <div class="button-container">
+    <button type="button" id="initMls">Init MLS</button>
+    <button type="button" id="fetch-members-btn">Fetch Members</button>
+    <button type="button" id="groupName">Select Group</button>
+    <button type="button" id="createRoom">Create MLS Room</button>
+    <button type="button" id="addMembers">Add Members</button>
+    <button type="button" id="getMess">Get Stored Group Messages</button>
+    <button type="button" id="fetch-groups-btn">Fetch Groups</button>
+  </div>
+  <!-- <div id="current_user">Current User:</div>
+    <div id="current_group">Current Group:</div> -->
+  <div class="status-bar">
+    <div id="current_user">User: -</div>
+    <div id="current_group">Room: -</div>
+  </div>
+  <div class="members" id="members">
+    <h3>Room Members</h3>
+  </div>
+  <!-- <div class="chat-container">
+      <div class="messages" id="messages"></div>
+      <div class="input-container">
+        <input type="text" id="message-input" placeholder="Type a message..." />
+        <button id="send-btn">Send</button>
+      </div>
+    </div> -->
+
+  <div class="chat-container">
+    <div class="messages" id="messages"></div>
+    <div class="input-container">
+      <input type="text" id="message-input" placeholder="Type a message..." />
+      <button id="send-btn">Send</button>
+    </div>
+  </div>
+  <div class="groups-container" id="groups">
+    <h3>Groups in Server</h3>
+  </div>
+</body>
+
+</html>
