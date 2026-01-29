@@ -17,12 +17,13 @@ use crate::{
     ciphersuite::{hash_ref::ProposalRef, signable::Signable},
     credentials::Credential,
     error::LibraryError,
+    extensions::Extensions,
     framing::{mls_auth_content::AuthenticatedContent, *},
     group::{
-        CreateGroupContextExtProposalError, Extension, ExtensionType, Extensions,
-        ExternalPubExtension, GroupContext, GroupEpoch, GroupId, MlsGroupJoinConfig,
-        MlsGroupStateError, OutgoingWireFormatPolicy, PublicGroup, RatchetTreeExtension,
-        RequiredCapabilitiesExtension, StagedCommit,
+        CreateGroupContextExtProposalError, Extension, ExtensionType, ExternalPubExtension,
+        GroupContext, GroupEpoch, GroupId, MlsGroupJoinConfig, MlsGroupStateError,
+        OutgoingWireFormatPolicy, PublicGroup, RatchetTreeExtension, RequiredCapabilitiesExtension,
+        StagedCommit,
     },
     key_packages::KeyPackageBundle,
     messages::{
@@ -66,6 +67,9 @@ pub(crate) mod processing;
 pub(crate) mod proposal;
 pub(crate) mod proposal_store;
 pub(crate) mod staged_commit;
+
+#[cfg(feature = "extensions-draft-08")]
+pub(crate) mod app_ephemeral;
 
 // Tests
 #[cfg(test)]
@@ -407,7 +411,7 @@ impl MlsGroup {
     }
 
     /// Get a reference to the group context [`Extensions`] of this [`MlsGroup`].
-    pub fn extensions(&self) -> &Extensions {
+    pub fn extensions(&self) -> &Extensions<GroupContext> {
         self.public_group().group_context().extensions()
     }
 
@@ -570,7 +574,7 @@ impl MlsGroup {
     pub(crate) fn create_group_context_ext_proposal<Provider: OpenMlsProvider>(
         &self,
         framing_parameters: FramingParameters,
-        extensions: Extensions,
+        extensions: Extensions<GroupContext>,
         signer: &impl Signer,
     ) -> Result<AuthenticatedContent, CreateGroupContextExtProposalError<Provider::StorageError>>
     {
@@ -636,7 +640,7 @@ impl MlsGroup {
     }
 
     /// Returns a reference to the proposal store.
-    pub(crate) fn proposal_store(&self) -> &ProposalStore {
+    pub fn proposal_store(&self) -> &ProposalStore {
         self.public_group.proposal_store()
     }
 
@@ -729,6 +733,10 @@ impl MlsGroup {
         storage.write_resumption_psk_store(self.group_id(), &self.resumption_psk_store)?;
         storage.write_mls_join_config(self.group_id(), &self.mls_group_config)?;
         storage.write_group_state(self.group_id(), &self.group_state)?;
+        #[cfg(feature = "extensions-draft-08")]
+        if let Some(application_export_tree) = &self.application_export_tree {
+            storage.write_application_export_tree(self.group_id(), application_export_tree)?;
+        }
 
         Ok(())
     }

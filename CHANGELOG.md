@@ -8,6 +8,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Added
+
+- [#1855](https://github.com/openmls/openmls/pull/1855): Added the `swap_members()` method to `MlsGroup` to replace members in a group, as well as the `WelcomeCommitMessages` and `SwapMembersError` structs.
+- [#1868](https://github.com/openmls/openmls/pull/1868): Implemented AppEphemeral functionality as defined in the MLS Extensions draft and replaced the existing AppAck proposal with the AppAck object, which can now be conveyed inside an AppEphemeral proposal. These features are behind the `extensions-draft-08` feature flag.
+- [#1874](https://github.com/openmls/openmls/pull/1874): In the `openmls_libcrux_crypto` provider, added AES-GCM support.
+- [#1900](https://github.com/openmls/openmls/pull/1900): Implemented GREASE (Generate Random Extensions And Sustain Extensibility) support as defined in [RFC 9420 Section 13.5](https://www.rfc-editor.org/rfc/rfc9420.html#section-13.5):
+  - Added `Grease(u16)` variants to `ProposalType`, `ExtensionType`, and `CredentialType` enums
+  - Added `is_grease()` methods to all GREASE-capable types including `VerifiableCiphersuite`
+  - Added `Capabilities::with_grease()` and `CapabilitiesBuilder::with_grease()` convenience methods to inject random GREASE values
+  - GREASE values are automatically recognized during deserialization and filtered during validation (treated the same as unknown values)
+  - Added comprehensive unit and integration tests for GREASE handling
+  - Added user manual documentation for GREASE support
+- [#1903](https://github.com/openmls/openmls/pull/1903): Added new error variants `MissingOwnLeaf` and `MissingCiphertext` to `ApplyUpdatePathError` for more fine-grained error handling in TreeSync.
+
+### Fixed
+- [#1868](https://github.com/openmls/openmls/pull/1868): The implementation of [valn0311](https://validation.openmls.tech/#valn0311), was updated to check support for all non-default proposals, instead of only checking support for Custom proposals.
+- [#1871](https://github.com/openmls/openmls/pull/1871): Fixed a bug where the application export tree (part of the `extensions-draft-08` feature) was not stored properly after group creation.
+
+### Changed
+- [#1874](https://github.com/openmls/openmls/pull/1874): Changed `ProposalType`, `ExtensionType`, and `CredentialType` enums to include `Grease(u16)` variant.
+- [#1924](https://github.com/openmls/openmls/pull/1924): Exposed `JoinBuilder::new` as public API.
+- [#1928](https://github.com/openmls/openmls/pull/1928): Processing a commit now fails if it contains a duplicate PSK proposal.
+
+- [#1926](https://github.com/openmls/openmls/pull/1926):
+  - Updated `getrandom` dependency in `js` feature to `0.3.4`
+  - Removed `libcrux-provider-js` feature (the `libcrux-provider`,`js` features are now sufficient to enable the libcrux crypto provider with support for compiling to wasm)
+
+## 0.7.1 (2025-09-24)
+
+### Added
+
 - [#1801](https://github.com/openmls/openmls/pull/1801): Added `MlsGroup::external_commit_builder`.
 - [#1814](https://github.com/openmls/openmls/pull/1814): Allow disabling leaf node lifetime validation in the ratchet tree when joining a group.
   - `StagedWelcome::build_from_welcome`: Alternative to `new_from_welcome` in a builder style that allows disabling lifetime validation of the incoming ratchet tree.
@@ -17,12 +47,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [#1840](https://github.com/openmls/openmls/pull/1840): Add `has_pending_proposals` getter method to `MlsGroup`.
 
 ### Fixed
+
 - [#1846](https://github.com/openmls/openmls/pull/1846): Fix persistence during message processing by properly persisting the secret tree after processing private messages and improve forward secrecy within epochs.
 
 ### Changed
+
 - [#1846](https://github.com/openmls/openmls/pull/1846): Processing messages in `MlsGroup` and `PublicGroup` now returns two different error types: `ProcessMessageError` and `PublicProcessMessageError`. `ProcessMessageError` now includes a storage error variant and `PublicProcessMessageError` no longer includes the `GroupStateError` variant.
+- [#1851](https://github.com/openmls/openmls/pull/1851): The GroupInfos in Welcome messages no longer contain an ExternalPub extension. This extension is generally useless for new group members, as its only purpose is to facilitate external joins.
 
 ### Deprecated
+
 - [#1801](https://github.com/openmls/openmls/pull/1801): Deprecated `MlsGroup::join_by_external_commit` in favor of `MlsGroup::external_commit_builder`.
 
 ## 0.7.0 (2025-07-17)
@@ -85,7 +119,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - [#1641](https://github.com/openmls/openmls/pull/1641): Fixed missing storage of queued proposals & clearing of the queued proposals.
 
-## 0.6.0-pre.1 (2024-07-22)
+## 0.6.0 (2024-07-22)
 
 ### Added
 

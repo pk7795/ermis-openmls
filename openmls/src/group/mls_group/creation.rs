@@ -4,6 +4,7 @@ use openmls_traits::storage::StorageProvider as StorageProviderTrait;
 use super::{builder::MlsGroupBuilder, *};
 use crate::{
     credentials::CredentialWithKey,
+    extensions::Extensions,
     group::{
         commit_builder::external_commits::ExternalCommitBuilder,
         errors::{ExternalCommitError, WelcomeError},
@@ -100,7 +101,7 @@ impl MlsGroup {
         verifiable_group_info: VerifiableGroupInfo,
         mls_group_config: &MlsGroupJoinConfig,
         capabilities: Option<Capabilities>,
-        extensions: Option<Extensions>,
+        extensions: Option<Extensions<LeafNode>>,
         aad: &[u8],
         credential_with_key: CredentialWithKey,
     ) -> Result<(Self, MlsMessageOut, Option<GroupInfo>), ExternalCommitError<Provider::StorageError>>
@@ -174,6 +175,10 @@ impl ProcessedWelcome {
             ciphersuite,
             provider.crypto(),
         )?;
+
+        // Validate PSKs
+        PreSharedKeyId::validate_in_welcome(&group_secrets.psks, ciphersuite)?;
+
         let psk_secret = {
             let psks = load_psks(
                 provider.storage(),
@@ -601,7 +606,7 @@ pub struct JoinBuilder<'a, Provider: OpenMlsProvider> {
 
 impl<'a, Provider: OpenMlsProvider> JoinBuilder<'a, Provider> {
     /// Create a new builder for the [`JoinBuilder`].
-    pub(crate) fn new(provider: &'a Provider, processed_welcome: ProcessedWelcome) -> Self {
+    pub fn new(provider: &'a Provider, processed_welcome: ProcessedWelcome) -> Self {
         Self {
             provider,
             processed_welcome,

@@ -155,7 +155,7 @@ impl<Provider: crate::storage::OpenMlsProvider> MemberState<Provider> {
     /// Thin wrapper around [`MlsGroup::propose_group_context_extensions`].
     fn propose_group_context_extensions(
         &mut self,
-        extensions: Extensions,
+        extensions: Extensions<GroupContext>,
     ) -> (MlsMessageOut, ProposalRef) {
         self.group
             .propose_group_context_extensions(&self.party.provider, extensions, &self.party.signer)
@@ -165,7 +165,7 @@ impl<Provider: crate::storage::OpenMlsProvider> MemberState<Provider> {
     /// Thin wrapper around [`MlsGroup::update_group_context_extensions`].
     fn update_group_context_extensions(
         &mut self,
-        extensions: Extensions,
+        extensions: Extensions<GroupContext>,
     ) -> (MlsMessageOut, Option<MlsMessageOut>, Option<GroupInfo>) {
         self.group
             .update_group_context_extensions(&self.party.provider, extensions, &self.party.signer)
@@ -290,26 +290,31 @@ fn happy_case() {
     let TestState { mut alice, mut bob } = setup::<Provider>(ciphersuite);
 
     // make extension with type 0xf001 a required capability
-    let (commit, _, _) =
-        alice.update_group_context_extensions(Extensions::single(Extension::RequiredCapabilities(
+    let (commit, _, _) = alice.update_group_context_extensions(
+        Extensions::single(Extension::RequiredCapabilities(
             RequiredCapabilitiesExtension::new(&[ExtensionType::Unknown(0xf001)], &[], &[]),
-        )));
+        ))
+        .expect("failed to create single-element extensions list"),
+    );
 
     alice.merge_pending_commit();
     bob.process_and_merge_commit(commit.into());
 
     // make extensions with type 0xf001 0xf002 a required capability, too;
     // this time with a separate proposal
-    let (proposal, _) = bob.propose_group_context_extensions(Extensions::single(
-        Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
-            &[
-                ExtensionType::Unknown(0xf001),
-                ExtensionType::Unknown(0xf002),
-            ],
-            &[],
-            &[],
-        )),
-    ));
+    let (proposal, _) = bob.propose_group_context_extensions(
+        Extensions::single(Extension::RequiredCapabilities(
+            RequiredCapabilitiesExtension::new(
+                &[
+                    ExtensionType::Unknown(0xf001),
+                    ExtensionType::Unknown(0xf002),
+                ],
+                &[],
+                &[],
+            ),
+        ))
+        .expect("failed to create single-element extensions list"),
+    );
 
     alice.process_and_store_proposal(proposal.into());
 
@@ -436,14 +441,17 @@ fn self_update_happy_case_simple() {
 ///   in the LeafNode's capabilities field.
 ///
 /// So far, we only test whether the check is done for extension types.
+/// https://validation.openmls.tech/#valn0103
 #[openmls_test]
-fn fail_insufficient_extensiontype_capabilities_add_valn103() {
+fn fail_insufficient_extensiontype_capabilities_add_valn0103() {
     let TestState { mut alice, mut bob } = setup::<Provider>(ciphersuite);
 
-    let (gce_req_cap_commit, _, _) =
-        alice.update_group_context_extensions(Extensions::single(Extension::RequiredCapabilities(
+    let (gce_req_cap_commit, _, _) = alice.update_group_context_extensions(
+        Extensions::single(Extension::RequiredCapabilities(
             RequiredCapabilitiesExtension::new(&[ExtensionType::Unknown(0xf002)], &[], &[]),
-        )));
+        ))
+        .expect("failed to create single-element extensions list"),
+    );
 
     alice.merge_pending_commit();
     bob.process_and_merge_commit(gce_req_cap_commit.clone().into());
@@ -553,15 +561,18 @@ fn fail_insufficient_extensiontype_capabilities_add_valn103() {
 //     containing an update proposal can not be the owner of the
 //     leaf node
 // - bob processes the invalid commit, which should give an InsufficientCapabilities error
+// https://validation.openmls.tech/#valn0103
 #[openmls_test]
-fn fail_insufficient_extensiontype_capabilities_update_valn103() {
+fn fail_insufficient_extensiontype_capabilities_update_valn0103() {
     let TestState { mut alice, mut bob } = setup::<Provider>(ciphersuite);
 
     // requires that all members need support for extension type 0xf002
-    let (gce_req_cap_commit, _, _) =
-        alice.update_group_context_extensions(Extensions::single(Extension::RequiredCapabilities(
+    let (gce_req_cap_commit, _, _) = alice.update_group_context_extensions(
+        Extensions::single(Extension::RequiredCapabilities(
             RequiredCapabilitiesExtension::new(&[ExtensionType::Unknown(0xf002)], &[], &[]),
-        )));
+        ))
+        .expect("failed to create single-element extensions list"),
+    );
 
     alice.merge_pending_commit();
     bob.process_and_merge_commit(gce_req_cap_commit.clone().into());
@@ -721,8 +732,9 @@ fn fail_insufficient_extensiontype_capabilities_update_valn103() {
 //
 // I suppose we need to talk about which test framework is the one we need.
 // See https://github.com/openmls/openmls/issues/1618.
+// https://validation.openmls.tech/#valn0201
 #[openmls_test]
-fn fail_key_package_version_valn201() {
+fn fail_key_package_version_valn0201() {
     let TestState { mut alice, mut bob } = setup::<Provider>(ciphersuite);
 
     let charlie = PartyState::<Provider>::generate("charlie", ciphersuite);
@@ -824,8 +836,9 @@ fn fail_key_package_version_valn201() {
 }
 
 // This tests that a commit containing more than one GCE Proposals does not pass validation.
+// https://validation.openmls.tech/#valn0308
 #[openmls_test]
-fn fail_2_gce_proposals_1_commit_valn308() {
+fn fail_2_gce_proposals_1_commit_valn0308() {
     let TestState { mut alice, mut bob } = setup::<Provider>(ciphersuite);
 
     // No required capabilities, so no specifically required extensions.
@@ -838,7 +851,8 @@ fn fail_2_gce_proposals_1_commit_valn308() {
 
     let new_extensions = Extensions::single(Extension::RequiredCapabilities(
         RequiredCapabilitiesExtension::new(&[ExtensionType::Unknown(0xf001)], &[], &[]),
-    ));
+    ))
+    .expect("failed to create single-element extensions list");
 
     let (proposal, _) = alice.propose_group_context_extensions(new_extensions.clone());
     bob.process_and_store_proposal(proposal.into());
@@ -864,7 +878,13 @@ fn fail_2_gce_proposals_1_commit_valn308() {
                         frankenstein::FrankenProposal::GroupContextExtensions(vec![
                             // ideally this should be some unknown extension, but it's tricky
                             // to get the payload set up correctly so we'll just go with this
-                            frankenstein::FrankenExtension::LastResort,
+                            frankenstein::FrankenExtension::RequiredCapabilities(
+                                frankenstein::FrankenRequiredCapabilitiesExtension {
+                                    extension_types: vec![],
+                                    proposal_types: vec![],
+                                    credential_types: vec![],
+                                },
+                            ),
                         ]),
                     );
 
@@ -930,6 +950,7 @@ fn fail_2_gce_proposals_1_commit_valn308() {
 // - we craft a commit to the proposal, signed by bob
 // - alice processes the commit expecting an error, and the error should be that the GCE is
 //   invalid
+// https://validation.openmls.tech/#valn1001
 #[openmls_test]
 fn fail_unsupported_gces_add_valn1001() {
     let TestState { mut alice, mut bob }: TestState<Provider> = setup(ciphersuite);
@@ -944,7 +965,8 @@ fn fail_unsupported_gces_add_valn1001() {
 
     let new_extensions = Extensions::single(Extension::RequiredCapabilities(
         RequiredCapabilitiesExtension::new(&[ExtensionType::Unknown(0xf001)], &[], &[]),
-    ));
+    ))
+    .expect("failed to create single-element extensions list");
 
     let (original_proposal, _) = bob.propose_group_context_extensions(new_extensions.clone());
 
@@ -1066,7 +1088,8 @@ fn proposal() {
 
     let new_extensions = Extensions::single(Extension::RequiredCapabilities(
         RequiredCapabilitiesExtension::new(&[ExtensionType::Unknown(0xf001)], &[], &[]),
-    ));
+    ))
+    .expect("failed to create single-element extensions list");
 
     let (proposal, _) = alice.propose_group_context_extensions(new_extensions.clone());
     bob.process_and_store_proposal(proposal.into());
@@ -1090,7 +1113,8 @@ fn proposal() {
     // === committing to two group context extensions should fail
     let new_extensions_2 = Extensions::single(Extension::RequiredCapabilities(
         RequiredCapabilitiesExtension::new(&[ExtensionType::RatchetTree], &[], &[]),
-    ));
+    ))
+    .expect("failed to create single-element extensions list");
 
     alice
         .group
@@ -1126,7 +1150,8 @@ fn proposal() {
     // contains unsupported extension
     let new_extensions = Extensions::single(Extension::RequiredCapabilities(
         RequiredCapabilitiesExtension::new(&[ExtensionType::Unknown(0xf042)], &[], &[]),
-    ));
+    ))
+    .expect("failed to create single-element extensions list");
 
     alice
         .group

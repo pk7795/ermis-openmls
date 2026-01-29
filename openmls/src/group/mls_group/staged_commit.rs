@@ -16,6 +16,8 @@ use super::{
     JoinerSecret, KeySchedule, LeafNode, LibraryError, MessageSecrets, MlsGroup, OpenMlsProvider,
     Proposal, ProposalQueue, PskSecret, QueuedProposal, Sender,
 };
+use crate::group::diff::PublicGroupDiff;
+use crate::prelude::{Commit, LeafNodeIndex};
 #[cfg(feature = "extensions-draft-08")]
 use crate::schedule::application_export_tree::ApplicationExportTree;
 
@@ -29,6 +31,11 @@ use crate::{
     schedule::{CommitSecret, EpochAuthenticator, EpochSecretsResult, InitSecret, PreSharedKeyId},
     treesync::node::encryption_keys::EncryptionKeyPair,
 };
+
+#[cfg(feature = "extensions-draft-08")]
+use super::proposal_store::{QueuedAppDataUpdateProposal, QueuedAppEphemeralProposal};
+#[cfg(feature = "extensions-draft-08")]
+use crate::prelude::processing::AppDataUpdates;
 
 impl MlsGroup {
     fn derive_epoch_secrets(
@@ -156,7 +163,52 @@ impl MlsGroup {
             }
         }
 
-        let ciphersuite = self.ciphersuite();
+        let (commit, proposal_queue, sender_index) = self
+            .public_group
+            .validate_commit(mls_content, provider.crypto())?;
+
+        // Create the provisional public group state (including the tree and
+        // group context) and apply proposals.
+        let mut diff = self.public_group.empty_diff();
+
+        #[cfg(not(feature = "extensions-draft-08"))]
+        let apply_proposals_values =
+            diff.apply_proposals(&proposal_queue, self.own_leaf_index())?;
+
+        #[cfg(feature = "extensions-draft-08")]
+        let apply_proposals_values = diff.apply_proposals_with_app_data_updates(
+            &proposal_queue,
+            self.own_leaf_index(),
+            None,
+        )?;
+        self.stage_applied_proposal_values(
+            apply_proposals_values,
+            diff,
+            commit,
+            proposal_queue,
+            sender_index,
+            mls_content,
+            old_epoch_keypairs,
+            leaf_node_keypairs,
+            provider,
+        )
+    }
+
+    #[cfg(feature = "extensions-draft-08")]
+    pub(crate) fn stage_commit_with_app_data_updates(
+        &self,
+        mls_content: &AuthenticatedContent,
+        old_epoch_keypairs: Vec<EncryptionKeyPair>,
+        leaf_node_keypairs: Vec<EncryptionKeyPair>,
+        app_data_dict_updates: Option<AppDataUpdates>,
+        provider: &impl OpenMlsProvider,
+    ) -> Result<StagedCommit, StageCommitError> {
+        // Check that the sender is another member of the group
+        if let Sender::Member(member) = mls_content.sender() {
+            if member == &self.own_leaf_index() {
+                return Err(StageCommitError::OwnCommit);
+            }
+        }
 
         let (commit, proposal_queue, sender_index) = self
             .public_group
@@ -166,9 +218,39 @@ impl MlsGroup {
         // group context) and apply proposals.
         let mut diff = self.public_group.empty_diff();
 
-        let apply_proposals_values =
-            diff.apply_proposals(&proposal_queue, self.own_leaf_index())?;
+        let apply_proposals_values = diff.apply_proposals_with_app_data_updates(
+            &proposal_queue,
+            self.own_leaf_index(),
+            app_data_dict_updates,
+        )?;
 
+        self.stage_applied_proposal_values(
+            apply_proposals_values,
+            diff,
+            commit,
+            proposal_queue,
+            sender_index,
+            mls_content,
+            old_epoch_keypairs,
+            leaf_node_keypairs,
+            provider,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stage_applied_proposal_values(
+        &self,
+        apply_proposals_values: ApplyProposalsValues,
+        mut diff: PublicGroupDiff,
+        commit: &Commit,
+        proposal_queue: ProposalQueue,
+        sender_index: LeafNodeIndex,
+        mls_content: &AuthenticatedContent,
+        old_epoch_keypairs: Vec<EncryptionKeyPair>,
+        leaf_node_keypairs: Vec<EncryptionKeyPair>,
+        provider: &impl OpenMlsProvider,
+    ) -> Result<StagedCommit, StageCommitError> {
+        let ciphersuite = self.ciphersuite();
         // Determine if Commit has a path
         let (commit_secret, new_keypairs, new_leaf_keypair_option, update_path_leaf_node) =
             if let Some(path) = commit.path.clone() {
@@ -474,6 +556,7 @@ impl MlsGroup {
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone, PartialEq))]
 pub(crate) enum StagedCommitState {
     PublicState(Box<PublicStagedCommitState>),
+    /// The group member variant of the staged commit state.
     GroupMember(Box<MemberStagedCommitState>),
 }
 
@@ -481,8 +564,10 @@ pub(crate) enum StagedCommitState {
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone, PartialEq))]
 pub struct StagedCommit {
-    staged_proposal_queue: ProposalQueue,
-    state: StagedCommitState,
+    /// A queue containing the proposals associated with the commit.
+    pub staged_proposal_queue: ProposalQueue,
+    /// The staged commit state.
+    pub(super) state: StagedCommitState,
 }
 
 impl StagedCommit {
@@ -513,6 +598,24 @@ impl StagedCommit {
     /// Returns the PresharedKey proposals that are covered by the Commit message as in iterator over [QueuedPskProposal].
     pub fn psk_proposals(&self) -> impl Iterator<Item = QueuedPskProposal<'_>> {
         self.staged_proposal_queue.psk_proposals()
+    }
+
+    #[cfg(feature = "extensions-draft-08")]
+    /// Returns the AppEphemeral proposals that are covered by the Commit message as an iterator
+    /// over [`QueuedAppEphemeralProposal`].
+    pub fn queued_app_ephemeral_proposals(
+        &self,
+    ) -> impl Iterator<Item = QueuedAppEphemeralProposal<'_>> {
+        self.staged_proposal_queue.app_ephemeral_proposals()
+    }
+    // NOTE: this is not a default proposal type
+    #[cfg(feature = "extensions-draft-08")]
+    /// Returns the AppDataUpdate proposals that are covered by the Commit message as an iterator
+    /// over [`QueuedAppDataUpdateProposal`].
+    pub fn app_data_update_proposals(
+        &self,
+    ) -> impl Iterator<Item = QueuedAppDataUpdateProposal<'_>> {
+        self.staged_proposal_queue.app_data_update_proposals()
     }
 
     /// Returns an iterator over all [`QueuedProposal`]s.
@@ -592,7 +695,6 @@ impl StagedCommit {
             StagedCommitState::GroupMember(ref gm) => gm.group_context(),
         }
     }
-
     /// Consume this [`StagedCommit`] and return the internal [`StagedCommitState`].
     pub(crate) fn into_state(self) -> StagedCommitState {
         self.state
@@ -628,7 +730,7 @@ impl StagedCommit {
     }
 }
 
-/// This struct is used internally by [StagedCommit] to encapsulate all the modified group state.
+/// This struct is used internally by [`StagedCommit`] to encapsulate all the modified group state.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone, PartialEq))]
 pub(crate) struct MemberStagedCommitState {
