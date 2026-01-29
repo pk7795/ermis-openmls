@@ -13,7 +13,7 @@ readme = "../README.md"
 libcrux-aead = { version = "0.0.4" }
 libcrux-ed25519 = { version = "0.0.4", features = ["rand"] }
 libcrux-hkdf = { version = "0.0.4" }
-libcrux-sha2 = { version = "0.0.4" }
+libcrux-sha2 = { version = "0.0.5" }
 libcrux-hmac = { version = "0.0.4" }
 libcrux-traits = { version = "0.0.4" }
 
