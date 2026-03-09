@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenMLS Chat Room Demo</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/light.css" />
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+        }
+
+        .demo-header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .demo-header h1 {
+            color: #2563eb;
+            margin-bottom: 10px;
+        }
+
+        .demo-header p {
+            color: #666;
+            font-size: 1.1em;
+        }
+
+        .control-panel {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 30px;
+            border-radius: 12px;
+            color: white;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        }
+
+        .control-panel h2 {
+            margin-top: 0;
+            color: white;
+        }
+
+        .step-indicator {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 20px;
+            gap: 10px;
+        }
+
+        .step {
+            flex: 1;
+            text-align: center;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .step.active {
+            background: rgba(255, 255, 255, 0.9);
+            color: #667eea;
+            transform: scale(1.05);
+        }
+
+        .step.completed {
+            background: rgba(34, 197, 94, 0.9);
+            color: white;
+        }
+
+        .action-button {
+            background: white;
+            color: #667eea;
+            border: none;
+            padding: 15px 30px;
+            font-size: 16px;
+            font-weight: 600;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .action-button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .action-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .chat-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .participant-panel {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            border: 2px solid #e5e7eb;
+        }
+
+        .participant-panel.alice {
+            border-color: #3b82f6;
+        }
+
+        .participant-panel.bob {
+            border-color: #10b981;
+        }
+
+        .participant-panel.charlie {
+            border-color: #f59e0b;
+        }
+
+        .participant-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #e5e7eb;
+        }
+
+        .avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 18px;
+        }
+
+        .alice .avatar {
+            background: #3b82f6;
+        }
+
+        .bob .avatar {
+            background: #10b981;
+        }
+
+        .charlie .avatar {
+            background: #f59e0b;
+        }
+
+        .participant-name {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #1f2937;
+        }
+
+        .status-badge {
+            margin-left: auto;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.75em;
+            font-weight: 600;
+        }
+
+        .status-badge.active {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .status-badge.pending {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .chat-messages {
+            height: 300px;
+            overflow-y: auto;
+            margin-bottom: 15px;
+            padding: 15px;
+            background: #f9fafb;
+            border-radius: 8px;
+            border: 1px solid #e5e7eb;
+        }
+
+        .message {
+            margin-bottom: 12px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .message.sent {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-align: right;
+        }
+
+        .message.received {
+            background: white;
+            border: 1px solid #e5e7eb;
+        }
+
+        .message-sender {
+            font-weight: 600;
+            margin-bottom: 4px;
+            font-size: 0.85em;
+        }
+
+        .message-text {
+            margin-bottom: 4px;
+        }
+
+        .message-key {
+            font-size: 0.7em;
+            opacity: 0.7;
+            font-family: monospace;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 10px;
+        }
+
+        .input-group input {
+            flex: 1;
+            padding: 10px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+
+        .input-group input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .send-button {
+            padding: 10px 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .send-button:hover:not(:disabled) {
+            transform: scale(1.05);
+        }
+
+        .send-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .key-info-panel {
+            background: #fffbeb;
+            border: 2px solid #fbbf24;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 30px;
+        }
+
+        .key-info-panel h3 {
+            margin-top: 0;
+            color: #92400e;
+        }
+
+        .key-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+            padding: 10px;
+            background: white;
+            border-radius: 6px;
+        }
+
+        .key-label {
+            font-weight: 600;
+            min-width: 80px;
+        }
+
+        .key-value {
+            font-family: monospace;
+            font-size: 0.9em;
+            color: #666;
+            word-break: break-all;
+        }
+
+        .match-indicator {
+            margin-left: auto;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.75em;
+            font-weight: 600;
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #9ca3af;
+        }
+
+        .log-panel {
+            background: #1f2937;
+            color: #e5e7eb;
+            padding: 20px;
+            border-radius: 12px;
+            margin-top: 30px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85em;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px 0;
+        }
+
+        .log-entry.success {
+            color: #34d399;
+        }
+
+        .log-entry.error {
+            color: #f87171;
+        }
+
+        .log-entry.info {
+            color: #60a5fa;
+        }
+
+        .hidden {
+            display: none;
+        }
+    </style>
+
+    <script type="module">
+        import init from "./openmls_wasm.js";
+        await init();
+    </script>
+</head>
+
+<body>
+    <div class="demo-header">
+        <h1>🔐 OpenMLS Chat Room Demo</h1>
+        <p>Demo tạo room với 2 người, sau đó 1 người mới join vào và chat với nhau</p>
+    </div>
+
+    <div class="control-panel">
+        <h2>Các bước thực hiện</h2>
+        <div class="step-indicator">
+            <div id="step1" class="step active">1. Khởi tạo Alice & Bob</div>
+            <div id="step2" class="step">2. Tạo room & Chat</div>
+            <div id="step3" class="step">3. Charlie join vào</div>
+            <div id="step4" class="step">4. Chat cả 3 người</div>
+        </div>
+
+        <div style="text-align: center; margin-top: 20px;">
+            <button id="initButton" class="action-button" onclick="window.initializeRoom()">
+                Bắt đầu - Khởi tạo Room
+            </button>
+            <button id="addCharlieButton" class="action-button hidden" onclick="window.addCharlie()">
+                Thêm Charlie vào Room
+            </button>
+        </div>
+    </div>
+
+    <div id="keyInfoPanel" class="key-info-panel hidden">
+        <h3>🔑 Shared Group Keys</h3>
+        <div id="keyInfoContent"></div>
+        <p style="margin-top: 15px; font-style: italic; color: #92400e;">
+            ✅ Tất cả các key đều giống nhau, được tạo an toàn thông qua giao thức MLS
+        </p>
+    </div>
+
+    <div id="chatContainer" class="chat-container hidden">
+        <!-- Alice Panel -->
+        <div class="participant-panel alice">
+            <div class="participant-header">
+                <div class="avatar">A</div>
+                <div class="participant-name">Alice</div>
+                <span class="status-badge active">Active</span>
+            </div>
+            <div id="aliceMessages" class="chat-messages">
+                <div class="empty-state">Chưa có tin nhắn nào</div>
+            </div>
+            <div class="input-group">
+                <input type="text" id="aliceInput" placeholder="Nhập tin nhắn từ Alice..."
+                    onkeypress="if(event.key==='Enter') window.sendMessageAsAlice()">
+                <button class="send-button" onclick="window.sendMessageAsAlice()">Gửi</button>
+            </div>
+        </div>
+
+        <!-- Bob Panel -->
+        <div class="participant-panel bob">
+            <div class="participant-header">
+                <div class="avatar">B</div>
+                <div class="participant-name">Bob</div>
+                <span class="status-badge active">Active</span>
+            </div>
+            <div id="bobMessages" class="chat-messages">
+                <div class="empty-state">Chưa có tin nhắn nào</div>
+            </div>
+            <div class="input-group">
+                <input type="text" id="bobInput" placeholder="Nhập tin nhắn từ Bob..."
+                    onkeypress="if(event.key==='Enter') window.sendMessageAsBob()">
+                <button class="send-button" onclick="window.sendMessageAsBob()">Gửi</button>
+            </div>
+        </div>
+
+        <!-- Charlie Panel (hidden initially) -->
+        <div id="charliePanel" class="participant-panel charlie hidden">
+            <div class="participant-header">
+                <div class="avatar">C</div>
+                <div class="participant-name">Charlie</div>
+                <span class="status-badge active">Active</span>
+            </div>
+            <div id="charlieMessages" class="chat-messages">
+                <div class="empty-state">Chưa có tin nhắn nào</div>
+            </div>
+            <div class="input-group">
+                <input type="text" id="charlieInput" placeholder="Nhập tin nhắn từ Charlie..."
+                    onkeypress="if(event.key==='Enter') window.sendMessageAsCharlie()">
+                <button class="send-button" onclick="window.sendMessageAsCharlie()">Gửi</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="log-panel">
+        <h3 style="margin-top: 0; color: #60a5fa;">📋 Protocol Logs</h3>
+        <div id="logContainer"></div>
+    </div>
+
+    <script type="module">
+        import { Identity, Provider, Group } from "./openmls_wasm.js";
+
+        // Utility functions
+        function bytes_to_hex(bytes) {
+            return Array.from(bytes, byte => ("0" + (byte & 0xff).toString(16)).slice(-2)).join("");
+        }
+
+        function compare_bytes(left, right) {
+            if (left.length !== right.length) return false;
+            return left.every((value, index) => value === right[index]);
+        }
+
+        function truncateKey(key) {
+            const keyHex = bytes_to_hex(key);
+            return keyHex.substring(0, 16) + "..." + keyHex.substring(keyHex.length - 16);
+        }
+
+        // Global state
+        let alice_provider, bob_provider, charlie_provider;
+        let alice, bob, charlie;
+        let chess_club_alice, chess_club_bob, chess_club_charlie;
+        let alice_exported_key, bob_exported_key, charlie_exported_key;
+        let messageCounter = 1;
+
+        // Logging functions
+        function log(message, type = 'info') {
+            const logContainer = document.getElementById('logContainer');
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+            console.log(message);
+        }
+
+        function updateStep(stepNum) {
+            for (let i = 1; i <= 4; i++) {
+                const step = document.getElementById(`step${i}`);
+                if (i < stepNum) {
+                    step.className = 'step completed';
+                } else if (i === stepNum) {
+                    step.className = 'step active';
+                } else {
+                    step.className = 'step';
+                }
+            }
+        }
+
+        function displayKeyInfo() {
+            const keyInfoContent = document.getElementById('keyInfoContent');
+            let html = `
+        <div class="key-row">
+          <span class="key-label">Alice:</span>
+          <span class="key-value">${truncateKey(alice_exported_key)}</span>
+          <span class="match-indicator">✓</span>
+        </div>
+        <div class="key-row">
+          <span class="key-label">Bob:</span>
+          <span class="key-value">${truncateKey(bob_exported_key)}</span>
+          <span class="match-indicator">✓</span>
+        </div>
+      `;
+
+            if (charlie_exported_key) {
+                html += `
+          <div class="key-row">
+            <span class="key-label">Charlie:</span>
+            <span class="key-value">${truncateKey(charlie_exported_key)}</span>
+            <span class="match-indicator">✓</span>
+          </div>
+        `;
+            }
+
+            keyInfoContent.innerHTML = html;
+            document.getElementById('keyInfoPanel').classList.remove('hidden');
+        }
+
+        function displayMessage(participant, sender, message, isSent, key) {
+            const messagesDiv = document.getElementById(`${participant}Messages`);
+
+            // Remove empty state if exists
+            const emptyState = messagesDiv.querySelector('.empty-state');
+            if (emptyState) {
+                emptyState.remove();
+            }
+
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${isSent ? 'sent' : 'received'}`;
+            messageDiv.innerHTML = `
+        <div class="message-sender">${sender}</div>
+        <div class="message-text">${message}</div>
+        <div class="message-key">Key: ${truncateKey(key)}</div>
+      `;
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        // Initialize room with Alice and Bob
+        window.initializeRoom = function () {
+            try {
+                log('🚀 Bắt đầu khởi tạo MLS protocol...', 'info');
+                updateStep(1);
+
+                // Create providers
+                alice_provider = new Provider();
+                bob_provider = new Provider();
+                log('✓ Đã tạo cryptographic providers cho Alice và Bob', 'success');
+
+                // Create identities
+                alice = new Identity(alice_provider, "alice");
+                bob = new Identity(bob_provider, "bob");
+                log('✓ Đã tạo identities cho Alice và Bob', 'success');
+
+                // Alice creates the group
+                chess_club_alice = Group.create_new(alice_provider, alice, "chess club");
+                log('✓ Alice đã tạo group "chess club"', 'success');
+
+                // Bob creates key package
+                const bob_key_pkg = bob.key_package(bob_provider);
+                log('✓ Bob đã tạo key package', 'success');
+
+                // Alice adds Bob to the group
+                const add_msgs = chess_club_alice.propose_and_commit_add(
+                    alice_provider,
+                    alice,
+                    bob_key_pkg
+                );
+                log('✓ Alice đã thêm Bob vào group (propose and commit)', 'success');
+
+                // Alice commits the changes
+                chess_club_alice.merge_pending_commit(alice_provider);
+                log('✓ Alice đã commit thay đổi', 'success');
+
+                // Export ratchet tree for Bob
+                const ratchet_tree = chess_club_alice.export_ratchet_tree();
+                log('✓ Alice đã export ratchet tree cho Bob', 'success');
+
+                // Bob joins the group
+                chess_club_bob = Group.join(
+                    bob_provider,
+                    add_msgs.welcome,
+                    ratchet_tree
+                );
+                log('✓ Bob đã join vào group với Welcome message', 'success');
+
+                // Export keys
+                alice_exported_key = chess_club_alice.export_key(
+                    alice_provider,
+                    "chess_key",
+                    new Uint8Array([0x30]),
+                    32
+                );
+
+                bob_exported_key = chess_club_bob.export_key(
+                    bob_provider,
+                    "chess_key",
+                    new Uint8Array([0x30]),
+                    32
+                );
+
+                // Verify keys match
+                if (!compare_bytes(alice_exported_key, bob_exported_key)) {
+                    log('❌ LỖI: Keys không khớp!', 'error');
+                    throw new Error('Key agreement failed');
+                }
+
+                log('✓ Key agreement thành công! Alice và Bob có cùng shared key', 'success');
+                log('🎉 Room đã sẵn sàng! Alice và Bob có thể chat với nhau', 'success');
+
+                // Update UI
+                displayKeyInfo();
+                document.getElementById('chatContainer').classList.remove('hidden');
+                document.getElementById('initButton').classList.add('hidden');
+                document.getElementById('addCharlieButton').classList.remove('hidden');
+                updateStep(2);
+
+            } catch (error) {
+                log(`❌ LỖI: ${error.message}`, 'error');
+                alert('Lỗi khi khởi tạo room: ' + error.message);
+            }
+        };
+
+        // Send message as Alice
+        window.sendMessageAsAlice = function () {
+            const input = document.getElementById('aliceInput');
+            const messageText = input.value.trim();
+            if (!messageText) return;
+
+            try {
+                log(`📤 Alice đang gửi tin nhắn #${messageCounter}...`, 'info');
+
+                const encoder = new TextEncoder();
+                const messageBytes = encoder.encode(messageText);
+
+                // Get current key
+                const currentKey = chess_club_alice.export_key(
+                    alice_provider,
+                    "message_key_" + messageCounter,
+                    new Uint8Array([messageCounter]),
+                    32
+                );
+
+                // Encrypt message
+                const encryptedMessage = chess_club_alice.create_message(
+                    alice_provider,
+                    alice,
+                    messageBytes
+                );
+                log(`✓ Alice đã mã hóa tin nhắn`, 'success');
+
+                // Display for Alice (sent)
+                displayMessage('alice', 'Alice', messageText, true, currentKey);
+
+                // Bob decrypts
+                const bob_decrypted = chess_club_bob.process_message(
+                    bob_provider,
+                    encryptedMessage
+                );
+                const decoder = new TextDecoder();
+                const decryptedText = decoder.decode(bob_decrypted);
+                log(`✓ Bob đã giải mã tin nhắn: "${decryptedText}"`, 'success');
+
+                // Display for Bob (received)
+                const bobKey = chess_club_bob.export_key(
+                    bob_provider,
+                    "message_key_" + messageCounter,
+                    new Uint8Array([messageCounter]),
+                    32
+                );
+                displayMessage('bob', 'Alice', decryptedText, false, bobKey);
+
+                // Charlie decrypts if exists
+                if (chess_club_charlie) {
+                    const charlie_decrypted = chess_club_charlie.process_message(
+                        charlie_provider,
+                        encryptedMessage
+                    );
+                    const charlieDecryptedText = decoder.decode(charlie_decrypted);
+                    log(`✓ Charlie đã giải mã tin nhắn: "${charlieDecryptedText}"`, 'success');
+
+                    const charlieKey = chess_club_charlie.export_key(
+                        charlie_provider,
+                        "message_key_" + messageCounter,
+                        new Uint8Array([messageCounter]),
+                        32
+                    );
+                    displayMessage('charlie', 'Alice', charlieDecryptedText, false, charlieKey);
+                }
+
+                input.value = '';
+                messageCounter++;
+            } catch (error) {
+                log(`❌ LỖI khi gửi tin nhắn: ${error.message}`, 'error');
+                alert('Lỗi: ' + error.message);
+            }
+        };
+
+        // Send message as Bob
+        window.sendMessageAsBob = function () {
+            const input = document.getElementById('bobInput');
+            const messageText = input.value.trim();
+            if (!messageText) return;
+
+            try {
+                log(`📤 Bob đang gửi tin nhắn #${messageCounter}...`, 'info');
+
+                const encoder = new TextEncoder();
+                const messageBytes = encoder.encode(messageText);
+
+                // Get current key
+                const currentKey = chess_club_bob.export_key(
+                    bob_provider,
+                    "message_key_" + messageCounter,
+                    new Uint8Array([messageCounter]),
+                    32
+                );
+
+                // Encrypt message
+                const encryptedMessage = chess_club_bob.create_message(
+                    bob_provider,
+                    bob,
+                    messageBytes
+                );
+                log(`✓ Bob đã mã hóa tin nhắn`, 'success');
+
+                // Display for Bob (sent)
+                displayMessage('bob', 'Bob', messageText, true, currentKey);
+
+                // Alice decrypts
+                const alice_decrypted = chess_club_alice.process_message(
+                    alice_provider,
+                    encryptedMessage
+                );
+                const decoder = new TextDecoder();
+                const decryptedText = decoder.decode(alice_decrypted);
+                log(`✓ Alice đã giải mã tin nhắn: "${decryptedText}"`, 'success');
+
+                // Display for Alice (received)
+                const aliceKey = chess_club_alice.export_key(
+                    alice_provider,
+                    "message_key_" + messageCounter,
+                    new Uint8Array([messageCounter]),
+                    32
+                );
+                displayMessage('alice', 'Bob', decryptedText, false, aliceKey);
+
+                // Charlie decrypts if exists
+                if (chess_club_charlie) {
+                    const charlie_decrypted = chess_club_charlie.process_message(
+                        charlie_provider,
+                        encryptedMessage
+                    );
+                    const charlieDecryptedText = decoder.decode(charlie_decrypted);
+                    log(`✓ Charlie đã giải mã tin nhắn: "${charlieDecryptedText}"`, 'success');
+
+                    const charlieKey = chess_club_charlie.export_key(
+                        charlie_provider,
+                        "message_key_" + messageCounter,
+                        new Uint8Array([messageCounter]),
+                        32
+                    );
+                    displayMessage('charlie', 'Bob', charlieDecryptedText, false, charlieKey);
+                }
+
+                input.value = '';
+                messageCounter++;
+            } catch (error) {
+                log(`❌ LỖI khi gửi tin nhắn: ${error.message}`, 'error');
+                alert('Lỗi: ' + error.message);
+            }
+        };
+
+        // Send message as Charlie
+        window.sendMessageAsCharlie = function () {
+            const input = document.getElementById('charlieInput');
+            const messageText = input.value.trim();
+            if (!messageText) return;
+
+            try {
+                log(`📤 Charlie đang gửi tin nhắn #${messageCounter}...`, 'info');
+
+                const encoder = new TextEncoder();
+                const messageBytes = encoder.encode(messageText);
+
+                // Get current key
+                const currentKey = chess_club_charlie.export_key(
+                    charlie_provider,
+                    "message_key_" + messageCounter,
+                    new Uint8Array([messageCounter]),
+                    32
+                );
+
+                // Encrypt message
+                const encryptedMessage = chess_club_charlie.create_message(
+                    charlie_provider,
+                    charlie,
+                    messageBytes
+                );
+                log(`✓ Charlie đã mã hóa tin nhắn`, 'success');
+
+                // Display for Charlie (sent)
+                displayMessage('charlie', 'Charlie', messageText, true, currentKey);
+
+                const decoder = new TextDecoder();
+
+                // Alice decrypts
+                const alice_decrypted = chess_club_alice.process_message(
+                    alice_provider,
+                    encryptedMessage
+                );
+                const aliceDecryptedText = decoder.decode(alice_decrypted);
+                log(`✓ Alice đã giải mã tin nhắn: "${aliceDecryptedText}"`, 'success');
+
+                const aliceKey = chess_club_alice.export_key(
+                    alice_provider,
+                    "message_key_" + messageCounter,
+                    new Uint8Array([messageCounter]),
+                    32
+                );
+                displayMessage('alice', 'Charlie', aliceDecryptedText, false, aliceKey);
+
+                // Bob decrypts
+                const bob_decrypted = chess_club_bob.process_message(
+                    bob_provider,
+                    encryptedMessage
+                );
+                const bobDecryptedText = decoder.decode(bob_decrypted);
+                log(`✓ Bob đã giải mã tin nhắn: "${bobDecryptedText}"`, 'success');
+
+                const bobKey = chess_club_bob.export_key(
+                    bob_provider,
+                    "message_key_" + messageCounter,
+                    new Uint8Array([messageCounter]),
+                    32
+                );
+                displayMessage('bob', 'Charlie', bobDecryptedText, false, bobKey);
+
+                input.value = '';
+                messageCounter++;
+            } catch (error) {
+                log(`❌ LỖI khi gửi tin nhắn: ${error.message}`, 'error');
+                alert('Lỗi: ' + error.message);
+            }
+        };
+
+        // Add Charlie to the room
+        window.addCharlie = function () {
+            try {
+                log('🚀 Bắt đầu thêm Charlie vào room...', 'info');
+                updateStep(3);
+
+                // Create Charlie's provider and identity
+                charlie_provider = new Provider();
+                charlie = new Identity(charlie_provider, "charlie");
+                log('✓ Đã tạo identity cho Charlie', 'success');
+
+                // Charlie creates key package
+                const charlie_key_pkg = charlie.key_package(charlie_provider);
+                log('✓ Charlie đã tạo key package', 'success');
+
+                // Alice adds Charlie to the group
+                const add_msgs = chess_club_alice.propose_and_commit_add(
+                    alice_provider,
+                    alice,
+                    charlie_key_pkg
+                );
+                log('✓ Alice đã propose thêm Charlie vào group', 'success');
+
+                // Alice commits
+                chess_club_alice.merge_pending_commit(alice_provider);
+                log('✓ Alice đã commit thay đổi', 'success');
+
+                // Export updated ratchet tree
+                const updated_ratchet_tree = chess_club_alice.export_ratchet_tree();
+                log('✓ Alice đã export updated ratchet tree', 'success');
+
+                // Bob processes BOTH the proposal and commit messages
+                // This is required by the MLS protocol - existing members must process the proposal first
+                chess_club_bob.process_message(bob_provider, add_msgs.proposal);
+                log('✓ Bob đã process proposal message', 'success');
+
+                chess_club_bob.process_message(bob_provider, add_msgs.commit);
+                log('✓ Bob đã process commit message', 'success');
+
+                // Charlie joins
+                chess_club_charlie = Group.join(
+                    charlie_provider,
+                    add_msgs.welcome,
+                    updated_ratchet_tree
+                );
+                log('✓ Charlie đã join vào group', 'success');
+
+                // Export keys for all members
+                const keyLabel = "chess_key";
+                const keyContext = new Uint8Array([0x30]);
+                const keyLength = 32;
+
+                alice_exported_key = chess_club_alice.export_key(alice_provider, keyLabel, keyContext, keyLength);
+                bob_exported_key = chess_club_bob.export_key(bob_provider, keyLabel, keyContext, keyLength);
+                charlie_exported_key = chess_club_charlie.export_key(charlie_provider, keyLabel, keyContext, keyLength);
+
+                // Verify all keys match
+                if (compare_bytes(alice_exported_key, charlie_exported_key) &&
+                    compare_bytes(bob_exported_key, charlie_exported_key)) {
+                    log('✓ Key agreement thành công! Tất cả members có cùng shared key', 'success');
+                    log('🎉 Charlie đã join thành công! Giờ cả 3 người có thể chat với nhau', 'success');
+
+                    // Update UI
+                    displayKeyInfo();
+                    document.getElementById('charliePanel').classList.remove('hidden');
+                    document.getElementById('addCharlieButton').classList.add('hidden');
+                    updateStep(4);
+                } else {
+                    log('❌ LỖI: Keys không khớp sau khi thêm Charlie!', 'error');
+                    throw new Error('Key agreement failed for Charlie');
+                }
+            } catch (error) {
+                log(`❌ LỖI khi thêm Charlie: ${error.message}`, 'error');
+                alert('Lỗi khi thêm Charlie: ' + error.message);
+            }
+        };
+
+    </script>
+</body>
+
+</html>

@@ -38,7 +38,12 @@ impl Backend {
                 .collect::<Vec<_>>()
                 .into(),
         );
+        log::info!("Registering client with key packages: {:?}", key_packages);
         let request = RegisterClientRequest { key_packages };
+        log::info!(
+            "Registering client with RegisterClientRequest: {:?}",
+            request
+        );
         let response_bytes = post(&url, &request)?;
         let response =
             RegisterClientSuccessResponse::tls_deserialize(&mut response_bytes.as_slice())

@@ -278,7 +278,11 @@ impl User {
                 .collect::<Vec<(TlsByteVecU8, KeyPackageIn)>>()
                 .into(),
         );
-
+        log::info!(
+            "Creating new key package for {} with hash ref {:?}",
+            self.username(),
+            ckp.0[0].0.as_slice()
+        );
         match self.backend.publish_key_packages(self, ckp) {
             Ok(()) => (),
             Err(e) => println!("Error sending new key package: {e:?}"),

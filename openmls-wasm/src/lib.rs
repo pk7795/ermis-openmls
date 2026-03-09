@@ -1,36 +1,65 @@
+//! OpenMLS WASM Bindings
+//!
+//! Production-ready WebAssembly bindings for OpenMLS, designed for integration
+//! with the Ermis chat system.
+//!
+//! ## Quick Start
+//!
+//! ```javascript
+//! import init, { Provider, Identity, Group } from 'openmls-wasm';
+//!
+//! await init();
+//! const provider = new Provider();
+//!
+//! // Create identity
+//! const identity = new Identity(provider, "user_abc123");
+//!
+//! // Create E2EE channel
+//! const group = Group.create_with_cid(provider, identity, "team:channel_xyz");
+//!
+//! // Send encrypted message
+//! const ciphertext = group.create_message(provider, identity, plaintext);
+//! ```
+//!
+//! ## Module Organization
+//!
+//! - `identity`: User identity and key package management
+//! - `group`: MLS group operations (create, join, proposals, commits, messaging)
+//! - `errors`: Error types for WASM binding
+//! - `types`: Shared types (RatchetTree, etc.)
+
+pub mod errors;
+pub mod group;
+pub mod identity;
+pub mod types;
 mod utils;
 
-use js_sys::Uint8Array;
-use openmls::{
-    credentials::{BasicCredential, CredentialWithKey},
-    framing::{MlsMessageBodyIn, MlsMessageIn, MlsMessageOut},
-    group::{GroupId, MlsGroup, MlsGroupJoinConfig, StagedWelcome},
-    key_packages::KeyPackage as OpenMlsKeyPackage,
-    prelude::SignatureScheme,
-    treesync::RatchetTreeIn,
-};
-use openmls_basic_credential::SignatureKeyPair;
+// Re-exports for convenience
+pub use errors::*;
+pub use group::*;
+pub use identity::*;
+pub use types::*;
+
 use openmls_rust_crypto::OpenMlsRustCrypto;
-use openmls_traits::{types::Ciphersuite, OpenMlsProvider};
-use tls_codec::{Deserialize, Serialize};
+use openmls_traits::types::Ciphersuite;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 extern "C" {
     fn alert(s: &str);
 
-    // Use `js_namespace` here to bind `console.log(..)` instead of just
-    // `log(..)`
     #[wasm_bindgen(js_namespace = console)]
     fn log(s: &str);
 }
 
-/// The ciphersuite used here. Fixed in order to reduce the binary size.
-static CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519;
+/// The ciphersuite used for all operations. Fixed to reduce binary size.
+pub(crate) static CIPHERSUITE: Ciphersuite =
+    Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519;
 
+/// Crypto provider for MLS operations
 #[wasm_bindgen]
 #[derive(Default)]
-pub struct Provider(OpenMlsRustCrypto);
+pub struct Provider(pub(crate) OpenMlsRustCrypto);
 
 impl AsRef<OpenMlsRustCrypto> for Provider {
     fn as_ref(&self) -> &OpenMlsRustCrypto {
@@ -52,358 +81,23 @@ impl Provider {
     }
 }
 
+/// Initialize the WASM module
+///
+/// Call this once at startup to set up panic hooks for better error messages.
+#[wasm_bindgen]
+pub fn init() {
+    utils::set_panic_hook();
+}
+
+/// Test function to verify the module is working
 #[wasm_bindgen]
 pub fn greet() {
-    alert("Hello, openmls!");
+    alert("Hello from OpenMLS WASM!");
 }
 
-#[wasm_bindgen]
-pub struct Identity {
-    credential_with_key: CredentialWithKey,
-    keypair: openmls_basic_credential::SignatureKeyPair,
-}
-
-#[wasm_bindgen]
-impl Identity {
-    #[wasm_bindgen(constructor)]
-    pub fn new(provider: &Provider, name: &str) -> Result<Identity, JsError> {
-        let signature_scheme = SignatureScheme::ED25519;
-        let identity = name.bytes().collect();
-        let credential = BasicCredential::new(identity);
-        let keypair = SignatureKeyPair::new(signature_scheme)?;
-
-        keypair.store(provider.0.storage())?;
-
-        let credential_with_key = CredentialWithKey {
-            credential: credential.into(),
-            signature_key: keypair.public().into(),
-        };
-
-        Ok(Identity {
-            credential_with_key,
-            keypair,
-        })
-    }
-
-    pub fn key_package(&self, provider: &Provider) -> KeyPackage {
-        KeyPackage(
-            OpenMlsKeyPackage::builder()
-                .build(
-                    CIPHERSUITE,
-                    &provider.0,
-                    &self.keypair,
-                    self.credential_with_key.clone(),
-                )
-                .unwrap()
-                .key_package()
-                .clone(),
-        )
-    }
-}
-
-#[wasm_bindgen]
-pub struct Group {
-    mls_group: MlsGroup,
-}
-
-#[wasm_bindgen]
-pub struct AddMessages {
-    proposal: Uint8Array,
-    commit: Uint8Array,
-    welcome: Uint8Array,
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-struct NativeAddMessages {
-    proposal: Vec<u8>,
-    commit: Vec<u8>,
-    welcome: Vec<u8>,
-}
-
-#[wasm_bindgen]
-impl AddMessages {
-    #[wasm_bindgen(getter)]
-    pub fn proposal(&self) -> Uint8Array {
-        self.proposal.clone()
-    }
-    #[wasm_bindgen(getter)]
-    pub fn commit(&self) -> Uint8Array {
-        self.commit.clone()
-    }
-    #[wasm_bindgen(getter)]
-    pub fn welcome(&self) -> Uint8Array {
-        self.welcome.clone()
-    }
-}
-
-#[wasm_bindgen]
-impl Group {
-    pub fn create_new(provider: &Provider, founder: &Identity, group_id: &str) -> Group {
-        let group_id_bytes = group_id.bytes().collect::<Vec<_>>();
-
-        let mls_group = MlsGroup::builder()
-            .ciphersuite(CIPHERSUITE)
-            .with_group_id(GroupId::from_slice(&group_id_bytes))
-            .build(
-                &provider.0,
-                &founder.keypair,
-                founder.credential_with_key.clone(),
-            )
-            .unwrap();
-
-        Group { mls_group }
-    }
-    pub fn join(
-        provider: &Provider,
-        mut welcome: &[u8],
-        ratchet_tree: RatchetTree,
-    ) -> Result<Group, JsError> {
-        let welcome = match MlsMessageIn::tls_deserialize(&mut welcome)?.extract() {
-            MlsMessageBodyIn::Welcome(welcome) => Ok(welcome),
-            other => Err(openmls::error::ErrorString::from(format!(
-                "expected a message of type welcome, got {other:?}",
-            ))),
-        }?;
-        let config = MlsGroupJoinConfig::builder().build();
-        let mls_group =
-            StagedWelcome::new_from_welcome(&provider.0, &config, welcome, Some(ratchet_tree.0))?
-                .into_group(&provider.0)?;
-
-        Ok(Group { mls_group })
-    }
-
-    pub fn export_ratchet_tree(&self) -> RatchetTree {
-        RatchetTree(self.mls_group.export_ratchet_tree().into())
-    }
-
-    pub fn propose_and_commit_add(
-        &mut self,
-        provider: &Provider,
-        sender: &Identity,
-        new_member: &KeyPackage,
-    ) -> Result<AddMessages, JsError> {
-        let (proposal_msg, _proposal_ref) =
-            self.mls_group
-                .propose_add_member(provider.as_ref(), &sender.keypair, &new_member.0)?;
-
-        let (commit_msg, welcome_msg, _group_info) = self
-            .mls_group
-            .commit_to_pending_proposals(&provider.0, &sender.keypair)?;
-
-        let welcome_msg = welcome_msg.ok_or(NoWelcomeError)?;
-
-        let proposal = mls_message_to_uint8array(&proposal_msg);
-        let commit = mls_message_to_uint8array(&commit_msg);
-        let welcome = mls_message_to_uint8array(&welcome_msg);
-
-        Ok(AddMessages {
-            proposal,
-            commit,
-            welcome,
-        })
-    }
-
-    pub fn merge_pending_commit(&mut self, provider: &mut Provider) -> Result<(), JsError> {
-        self.mls_group
-            .merge_pending_commit(provider.as_mut())
-            .map_err(|e| e.into())
-    }
-
-    pub fn create_message(
-        &mut self,
-        provider: &Provider,
-        sender: &Identity,
-        msg: &[u8],
-    ) -> Result<Vec<u8>, JsError> {
-        let msg_out = &self
-            .mls_group
-            .create_message(provider.as_ref(), &sender.keypair, msg)?;
-        let mut serialized = vec![];
-        msg_out.tls_serialize(&mut serialized)?;
-        Ok(serialized)
-    }
-
-    pub fn process_message(
-        &mut self,
-        provider: &mut Provider,
-        mut msg: &[u8],
-    ) -> Result<Vec<u8>, JsError> {
-        let msg = MlsMessageIn::tls_deserialize(&mut msg).unwrap();
-
-        let msg = match msg.extract() {
-            openmls::framing::MlsMessageBodyIn::PublicMessage(msg) => {
-                self.mls_group.process_message(provider.as_ref(), msg)?
-            }
-
-            openmls::framing::MlsMessageBodyIn::PrivateMessage(msg) => {
-                self.mls_group.process_message(provider.as_ref(), msg)?
-            }
-            openmls::framing::MlsMessageBodyIn::Welcome(_) => todo!(),
-            openmls::framing::MlsMessageBodyIn::GroupInfo(_) => todo!(),
-            openmls::framing::MlsMessageBodyIn::KeyPackage(_) => todo!(),
-        };
-
-        match msg.into_content() {
-            openmls::framing::ProcessedMessageContent::ApplicationMessage(app_msg) => {
-                Ok(app_msg.into_bytes())
-            }
-            openmls::framing::ProcessedMessageContent::ProposalMessage(proposal)
-            | openmls::framing::ProcessedMessageContent::ExternalJoinProposalMessage(proposal) => {
-                self.mls_group
-                    .store_pending_proposal(provider.0.storage(), *proposal)?;
-                Ok(vec![])
-            }
-            openmls::framing::ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
-                self.mls_group
-                    .merge_staged_commit(provider.as_mut(), *staged_commit)?;
-                Ok(vec![])
-            }
-        }
-    }
-
-    pub fn export_key(
-        &self,
-        provider: &Provider,
-        label: &str,
-        context: &[u8],
-        key_length: usize,
-    ) -> Result<Vec<u8>, JsError> {
-        self.mls_group
-            .export_secret(provider.as_ref().crypto(), label, context, key_length)
-            .map_err(|e| {
-                println!("export key error: {e}");
-                e.into()
-            })
-    }
-}
-
-#[cfg(test)]
-impl Group {
-    fn native_propose_and_commit_add(
-        &mut self,
-        provider: &Provider,
-        sender: &Identity,
-        new_member: &KeyPackage,
-    ) -> Result<NativeAddMessages, JsError> {
-        let (proposal_msg, _proposal_ref) =
-            self.mls_group
-                .propose_add_member(provider.as_ref(), &sender.keypair, &new_member.0)?;
-
-        let (commit_msg, welcome_msg, _group_info) = self
-            .mls_group
-            .commit_to_pending_proposals(provider.as_ref(), &sender.keypair)?;
-
-        let welcome_msg = welcome_msg.ok_or(NoWelcomeError)?;
-
-        let proposal = mls_message_to_u8vec(&proposal_msg);
-        let commit = mls_message_to_u8vec(&commit_msg);
-        let welcome = mls_message_to_u8vec(&welcome_msg);
-
-        Ok(NativeAddMessages {
-            proposal,
-            commit,
-            welcome,
-        })
-    }
-
-    fn native_join(provider: &Provider, mut welcome: &[u8], ratchet_tree: RatchetTree) -> Group {
-        let welcome = MlsMessageIn::tls_deserialize(&mut welcome)
-            .unwrap()
-            .into_welcome()
-            .expect("expected a message of type welcome");
-        let config = MlsGroupJoinConfig::builder().build();
-        let mls_group = StagedWelcome::new_from_welcome(
-            provider.as_ref(),
-            &config,
-            welcome,
-            Some(ratchet_tree.0),
-        )
-        .unwrap()
-        .into_group(provider.as_ref())
-        .unwrap();
-
-        Group { mls_group }
-    }
-}
-
-#[wasm_bindgen]
-#[derive(Debug)]
-pub struct NoWelcomeError;
-
-impl std::fmt::Display for NoWelcomeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "no welcome")
-    }
-}
-
-impl std::error::Error for NoWelcomeError {}
-
-#[wasm_bindgen]
-pub struct KeyPackage(OpenMlsKeyPackage);
-
-#[wasm_bindgen]
-impl KeyPackage {
-    /// Serialize this KeyPackage to bytes
-    #[wasm_bindgen]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.0.tls_serialize_detached().unwrap()
-    }
-
-    /// Deserialize a KeyPackage from bytes
-    #[wasm_bindgen]
-    pub fn from_bytes(bytes: &[u8]) -> Result<KeyPackage, JsError> {
-        let mut s = bytes;
-        let kp_in = openmls::key_packages::KeyPackageIn::tls_deserialize(&mut s)
-            .map_err(|e| JsError::new(&format!("KeyPackage deserialization error: {e}")))?;
-        let kp = kp_in
-            .validate(
-                &openmls_rust_crypto::RustCrypto::default(),
-                openmls::prelude::ProtocolVersion::Mls10,
-            )
-            .map_err(|e| JsError::new(&format!("KeyPackage validation error: {e}")))?;
-        Ok(KeyPackage(kp))
-    }
-}
-
-#[wasm_bindgen]
-pub struct RatchetTree(RatchetTreeIn);
-
-#[wasm_bindgen]
-impl RatchetTree {
-    /// Serialize this RatchetTree to bytes
-    #[wasm_bindgen]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.0.tls_serialize_detached().unwrap()
-    }
-
-    /// Deserialize a RatchetTree from bytes
-    #[wasm_bindgen]
-    pub fn from_bytes(bytes: &[u8]) -> Result<RatchetTree, JsError> {
-        let mut s = bytes;
-        let tree = RatchetTreeIn::tls_deserialize(&mut s)
-            .map_err(|e| JsError::new(&format!("RatchetTree deserialization error: {e}")))?;
-        Ok(RatchetTree(tree))
-    }
-}
-
-fn mls_message_to_uint8array(msg: &MlsMessageOut) -> Uint8Array {
-    // see https://github.com/rustwasm/wasm-bindgen/issues/1619#issuecomment-505065294
-
-    let mut serialized = vec![];
-    msg.tls_serialize(&mut serialized).unwrap();
-
-    unsafe { Uint8Array::new(&Uint8Array::view(&serialized)) }
-}
-
-#[cfg(test)]
-fn mls_message_to_u8vec(msg: &MlsMessageOut) -> Vec<u8> {
-    // see https://github.com/rustwasm/wasm-bindgen/issues/1619#issuecomment-505065294
-
-    let mut serialized = vec![];
-    msg.tls_serialize(&mut serialized).unwrap();
-    serialized
-}
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -411,7 +105,7 @@ mod tests {
 
     fn js_error_to_string(e: JsError) -> String {
         let v: JsValue = e.into();
-        v.as_string().unwrap()
+        v.as_string().unwrap_or_else(|| "Unknown error".to_string())
     }
 
     fn create_group_alice_and_bob() -> (Provider, Identity, Group, Provider, Identity, Group) {
@@ -425,12 +119,15 @@ mod tests {
             .map_err(js_error_to_string)
             .unwrap();
 
-        let mut chess_club_alice = Group::create_new(&alice_provider, &alice, "chess club");
+        let mut chess_club_alice =
+            Group::create_with_cid(&alice_provider, &alice, "team:chess_club")
+                .map_err(js_error_to_string)
+                .unwrap();
 
         let bob_key_pkg = bob.key_package(&bob_provider);
 
-        let add_msgs = chess_club_alice
-            .native_propose_and_commit_add(&alice_provider, &alice, &bob_key_pkg)
+        let add_result = chess_club_alice
+            .add_members(&alice_provider, &alice, vec![bob_key_pkg])
             .map_err(js_error_to_string)
             .unwrap();
 
@@ -440,8 +137,11 @@ mod tests {
             .unwrap();
 
         let ratchet_tree = chess_club_alice.export_ratchet_tree();
+        let welcome = add_result.welcome().expect("Should have welcome");
 
-        let chess_club_bob = Group::native_join(&bob_provider, &add_msgs.welcome, ratchet_tree);
+        let chess_club_bob = Group::join_with_welcome(&bob_provider, &welcome, Some(ratchet_tree))
+            .map_err(js_error_to_string)
+            .unwrap();
 
         (
             alice_provider,
@@ -454,38 +154,117 @@ mod tests {
     }
 
     #[test]
-    fn basic() {
-        let (alice_provider, _, chess_club_alice, bob_provider, _, chess_club_bob) =
-            create_group_alice_and_bob();
+    fn test_cid_roundtrip() {
+        let provider = Provider::new();
+        let alice = Identity::new(&provider, "alice").unwrap();
+        let cid = "team:my_channel_123";
+        let group = Group::create_with_cid(&provider, &alice, cid).unwrap();
 
-        let bob_exported_key = chess_club_bob
-            .export_key(&bob_provider, "chess_key", &[0x30], 32)
-            .map_err(js_error_to_string)
-            .unwrap();
-        let alice_exported_key = chess_club_alice
-            .export_key(&alice_provider, "chess_key", &[0x30], 32)
-            .map_err(js_error_to_string)
-            .unwrap();
-
-        assert_eq!(bob_exported_key, alice_exported_key);
+        assert_eq!(group.cid().unwrap(), cid);
     }
 
     #[test]
-    fn create_message() {
+    fn test_group_creation_and_join() {
+        let (alice_provider, _, chess_club_alice, bob_provider, _, chess_club_bob) =
+            create_group_alice_and_bob();
+
+        // Both should have same key
+        let bob_key = chess_club_bob
+            .export_key(&bob_provider, "test_key", &[0x30], 32)
+            .map_err(js_error_to_string)
+            .unwrap();
+        let alice_key = chess_club_alice
+            .export_key(&alice_provider, "test_key", &[0x30], 32)
+            .map_err(js_error_to_string)
+            .unwrap();
+
+        assert_eq!(bob_key, alice_key);
+    }
+
+    #[test]
+    fn test_encrypted_messaging() {
         let (alice_provider, alice, mut chess_club_alice, mut bob_provider, _, mut chess_club_bob) =
             create_group_alice_and_bob();
 
-        let alice_msg = "hello, bob!".as_bytes();
-        let msg_out = chess_club_alice
-            .create_message(&alice_provider, &alice, alice_msg)
+        let plaintext = b"Hello, Bob!";
+        let ciphertext = chess_club_alice
+            .create_message(&alice_provider, &alice, plaintext)
             .map_err(js_error_to_string)
             .unwrap();
 
-        let bob_msg = chess_club_bob
-            .process_message(&mut bob_provider, &msg_out)
+        let processed = chess_club_bob
+            .process_message(&mut bob_provider, &ciphertext)
             .map_err(js_error_to_string)
             .unwrap();
 
-        assert_eq!(alice_msg, bob_msg);
+        assert!(processed.is_application_message());
+        assert_eq!(processed.content().unwrap(), plaintext.to_vec());
+    }
+
+    #[test]
+    fn test_proposal_commit_separation() {
+        let mut alice_provider = Provider::new();
+        let bob_provider = Provider::new();
+        let charlie_provider = Provider::new();
+
+        let alice = Identity::new(&alice_provider, "alice").unwrap();
+        let bob = Identity::new(&bob_provider, "bob").unwrap();
+        let charlie = Identity::new(&charlie_provider, "charlie").unwrap();
+
+        let mut group = Group::create_with_cid(&alice_provider, &alice, "team:test").unwrap();
+
+        // Propose add both bob and charlie
+        let bob_kp = bob.key_package(&bob_provider);
+        let charlie_kp = charlie.key_package(&charlie_provider);
+
+        let _prop1 = group
+            .propose_add_member(&alice_provider, &alice, &bob_kp)
+            .unwrap();
+        let _prop2 = group
+            .propose_add_member(&alice_provider, &alice, &charlie_kp)
+            .unwrap();
+
+        assert_eq!(group.pending_proposals_count(), 2);
+
+        // Single commit for both
+        let commit_bundle = group
+            .commit_pending_proposals(&alice_provider, &alice)
+            .unwrap();
+        assert!(commit_bundle.has_welcome());
+
+        group.merge_pending_commit(&mut alice_provider).unwrap();
+
+        // Verify both are members
+        let members = group.members();
+        assert_eq!(members.len(), 3); // alice, bob, charlie
+    }
+
+    #[test]
+    fn test_member_info() {
+        let (_, _, chess_club_alice, _, _, _) = create_group_alice_and_bob();
+
+        let members = chess_club_alice.members();
+        assert_eq!(members.len(), 2);
+
+        // Check we can find alice
+        let alice_member = chess_club_alice.member_by_user_id("alice");
+        assert!(alice_member.is_some());
+        assert_eq!(alice_member.unwrap().user_id(), "alice");
+
+        // Check we can find bob
+        let bob_member = chess_club_alice.member_by_user_id("bob");
+        assert!(bob_member.is_some());
+        assert_eq!(bob_member.unwrap().user_id(), "bob");
+    }
+
+    #[test]
+    fn test_identity_serialization() {
+        let provider = Provider::new();
+        let alice = Identity::new(&provider, "alice_user_123").unwrap();
+
+        let bytes = alice.to_bytes().unwrap();
+        let restored = Identity::from_bytes(&provider, &bytes).unwrap();
+
+        assert_eq!(restored.user_id(), "alice_user_123");
     }
 }

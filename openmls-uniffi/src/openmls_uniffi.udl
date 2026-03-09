@@ -1,0 +1,168 @@
+namespace openmls_uniffi {
+    [Throws=MlsError]
+    ExternalJoinResult join_external(Provider provider, Identity identity, bytes group_info, RatchetTree? ratchet_tree);
+};
+
+[Error]
+enum MlsError {
+    "SerializationError",
+    "DeserializationError",
+    "GroupNotOperational",
+    "MemberNotFound",
+    "InvalidMessage",
+    "NoWelcome",
+    "InvalidCid",
+    "StorageError",
+    "CryptoError",
+    "InvalidState",
+    "ExternalCommitError",
+    "InternalError",
+};
+
+enum MessageType {
+    "ApplicationMessage",
+    "Proposal",
+    "Commit",
+};
+
+dictionary MemberInfo {
+    u32 index;
+    string user_id;
+    bytes encryption_key;
+    bytes signature_key;
+};
+
+dictionary CommitBundle {
+    bytes commit;
+    bytes? welcome;
+    bytes? group_info;
+};
+
+dictionary ProposalMessage {
+    bytes bytes;
+    bytes proposal_ref;
+};
+
+dictionary ProcessedMessage {
+    MessageType message_type;
+    bytes? content;
+    u32 sender_index;
+    u64 epoch;
+    bytes aad;
+};
+
+dictionary ExternalJoinResult {
+    Group group;
+    bytes commit;
+};
+
+interface Provider {
+    constructor();
+};
+
+interface Identity {
+    [Throws=MlsError]
+    constructor(Provider provider, string user_id);
+
+    string user_id();
+    KeyPackage key_package(Provider provider);
+    sequence<KeyPackage> key_packages(Provider provider, u32 count);
+
+    [Throws=MlsError]
+    bytes to_bytes();
+
+    [Throws=MlsError, Name=from_bytes]
+    constructor(Provider provider, bytes data);
+};
+
+interface KeyPackage {
+    bytes to_bytes();
+
+    [Throws=MlsError, Name=from_bytes]
+    constructor(bytes data);
+
+    [Throws=MlsError]
+    bytes hash_ref(Provider provider);
+};
+
+interface RatchetTree {
+    bytes to_bytes();
+
+    [Throws=MlsError, Name=from_bytes]
+    constructor(bytes data);
+};
+
+interface Group {
+    [Throws=MlsError, Name=create_with_cid]
+    constructor(Provider provider, Identity founder, string cid);
+
+    [Throws=MlsError, Name=join_with_welcome]
+    constructor(Provider provider, bytes welcome, RatchetTree? ratchet_tree);
+
+    // State
+    [Throws=MlsError]
+    string cid();
+    bytes group_id();
+    u64 epoch();
+    sequence<MemberInfo> members();
+    MemberInfo? member_by_user_id(string user_id);
+    u32 own_leaf_index();
+    boolean is_operational();
+    boolean has_pending_commit();
+    RatchetTree export_ratchet_tree();
+
+    [Throws=MlsError]
+    bytes export_group_info(Provider provider, Identity sender, boolean with_ratchet_tree);
+
+    [Throws=MlsError]
+    bytes export_key(Provider provider, string label, bytes context, u32 key_length);
+
+    // Messaging
+    [Throws=MlsError]
+    bytes create_message(Provider provider, Identity sender, bytes plaintext);
+
+    void set_aad(bytes aad);
+
+    [Throws=MlsError]
+    bytes create_message_with_aad(Provider provider, Identity sender, bytes plaintext, bytes aad);
+
+    [Throws=MlsError]
+    ProcessedMessage process_message(Provider provider, bytes msg);
+
+    // Proposals
+    [Throws=MlsError]
+    ProposalMessage propose_add_member(Provider provider, Identity sender, KeyPackage new_member);
+
+    [Throws=MlsError]
+    ProposalMessage propose_remove_member(Provider provider, Identity sender, u32 member_index);
+
+    [Throws=MlsError]
+    ProposalMessage propose_remove_member_by_user_id(Provider provider, Identity sender, string user_id);
+
+    [Throws=MlsError]
+    ProposalMessage propose_self_update(Provider provider, Identity sender);
+
+    u64 pending_proposals_count();
+
+    [Throws=MlsError]
+    void clear_pending_proposals(Provider provider);
+
+    // Commits
+    [Throws=MlsError]
+    CommitBundle commit_pending_proposals(Provider provider, Identity sender);
+
+    [Throws=MlsError]
+    void merge_pending_commit(Provider provider);
+
+    [Throws=MlsError]
+    void clear_pending_commit(Provider provider);
+
+    [Throws=MlsError]
+    CommitBundle add_members(Provider provider, Identity sender, sequence<KeyPackage> new_members);
+
+    [Throws=MlsError]
+    CommitBundle remove_members(Provider provider, Identity sender, sequence<u32> member_indices);
+
+    [Throws=MlsError]
+    CommitBundle self_update(Provider provider, Identity sender);
+};

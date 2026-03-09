@@ -1,0 +1,666 @@
+/* tslint:disable */
+/* eslint-disable */
+/**
+ * Initialize the WASM module
+ *
+ * Call this once at startup to set up panic hooks for better error messages.
+ */
+export function init(): void;
+/**
+ * Test function to verify the module is working
+ */
+export function greet(): void;
+/**
+ * Type of processed message
+ */
+export enum MessageType {
+  /**
+   * Application message (encrypted user content)
+   */
+  ApplicationMessage = 0,
+  /**
+   * Proposal message (add/remove/update)
+   */
+  Proposal = 1,
+  /**
+   * Commit message (finalizing proposals)
+   */
+  Commit = 2,
+}
+/**
+ * Error codes for MLS operations
+ */
+export enum MlsErrorCode {
+  /**
+   * Error during serialization
+   */
+  SerializationError = 0,
+  /**
+   * Error during deserialization
+   */
+  DeserializationError = 1,
+  /**
+   * Group is not in operational state
+   */
+  GroupNotOperational = 2,
+  /**
+   * Member not found in group
+   */
+  MemberNotFound = 3,
+  /**
+   * Invalid message format or content
+   */
+  InvalidMessage = 4,
+  /**
+   * Welcome message was expected but not generated
+   */
+  NoWelcome = 5,
+  /**
+   * Invalid CID format
+   */
+  InvalidCid = 6,
+  /**
+   * Storage operation failed
+   */
+  StorageError = 7,
+  /**
+   * Crypto operation failed
+   */
+  CryptoError = 8,
+  /**
+   * Invalid state
+   */
+  InvalidState = 9,
+  /**
+   * External commit failed
+   */
+  ExternalCommitError = 10,
+}
+/**
+ * Messages generated when adding a member (legacy format)
+ */
+export class AddMessages {
+  private constructor();
+  free(): void;
+  readonly proposal: Uint8Array;
+  readonly commit: Uint8Array;
+  readonly welcome: Uint8Array;
+}
+/**
+ * Bundle containing commit message and optional welcome
+ */
+export class CommitBundle {
+  private constructor();
+  free(): void;
+  /**
+   * Check if this commit includes a welcome (new members added)
+   */
+  has_welcome(): boolean;
+  /**
+   * Get commit as Uint8Array
+   */
+  commit_as_uint8array(): Uint8Array;
+  /**
+   * Get welcome as Uint8Array (returns empty if no welcome)
+   */
+  welcome_as_uint8array(): Uint8Array;
+  /**
+   * Get the commit message bytes
+   */
+  readonly commit: Uint8Array;
+  /**
+   * Get the welcome message bytes (if any new members were added)
+   */
+  readonly welcome: Uint8Array | undefined;
+  /**
+   * Get the group info bytes
+   */
+  readonly group_info: Uint8Array | undefined;
+}
+/**
+ * Result of an external join (self-join with GroupInfo)
+ */
+export class ExternalJoinResult {
+  private constructor();
+  free(): void;
+  /**
+   * Get the joined group
+   */
+  readonly group: Group | undefined;
+  /**
+   * Get the commit message to broadcast
+   */
+  readonly commit: Uint8Array;
+}
+/**
+ * An MLS Group representing an encrypted channel
+ */
+export class Group {
+  private constructor();
+  free(): void;
+  /**
+   * Commit all pending proposals
+   *
+   * This creates a commit message that includes all queued proposals.
+   * Use `merge_pending_commit` after the DS confirms the commit.
+   */
+  commit_pending_proposals(provider: Provider, sender: Identity): CommitBundle;
+  /**
+   * Merge the pending commit after DS confirmation
+   */
+  merge_pending_commit(provider: Provider): void;
+  /**
+   * Discard the pending commit (rollback)
+   */
+  clear_pending_commit(provider: Provider): void;
+  /**
+   * Add members and commit immediately (convenience method)
+   *
+   * Use this when you want to add members without batching.
+   * For batch operations, use `propose_add_member` + `commit_pending_proposals`.
+   */
+  add_members(provider: Provider, sender: Identity, new_members: KeyPackage[]): CommitBundle;
+  /**
+   * Remove members and commit immediately (convenience method)
+   */
+  remove_members(provider: Provider, sender: Identity, member_indices: Uint32Array): CommitBundle;
+  /**
+   * Key rotation with immediate commit (convenience method)
+   */
+  self_update(provider: Provider, sender: Identity): CommitBundle;
+  /**
+   * Combined propose and commit for adding a single member
+   * This is kept for backwards compatibility with demo code
+   */
+  propose_and_commit_add(provider: Provider, sender: Identity, new_member: KeyPackage): AddMessages;
+  /**
+   * Create an encrypted message
+   *
+   * # Arguments
+   * * `provider` - Crypto provider
+   * * `sender` - Identity of the sender
+   * * `plaintext` - The message content to encrypt
+   * 1
+   * # Returns
+   * Serialized encrypted MLS message
+   */
+  create_message(provider: Provider, sender: Identity, plaintext: Uint8Array): Uint8Array;
+  /**
+   * Set Additional Authenticated Data (AAD) for the next outgoing message
+   *
+   * AAD is authenticated but NOT encrypted - use for metadata that needs
+   * to be bound cryptographically to the ciphertext (e.g., sender_id, channel_id).
+   * AAD is automatically reset after create_message() is called.
+   *
+   * # Arguments
+   * * `aad` - Bytes to use as AAD (typically JSON-serialized metadata)
+   */
+  set_aad(aad: Uint8Array): void;
+  /**
+   * Create an encrypted message with AAD in one call
+   *
+   * This is a convenience method that sets AAD and creates the message.
+   *
+   * # Arguments
+   * * `provider` - Crypto provider
+   * * `sender` - Identity of the sender
+   * * `plaintext` - The message content to encrypt
+   * * `aad` - Additional authenticated data (metadata to bind to ciphertext)
+   */
+  create_message_with_aad(provider: Provider, sender: Identity, plaintext: Uint8Array, aad: Uint8Array): Uint8Array;
+  /**
+   * Process an incoming message (decrypt or handle proposal/commit)
+   *
+   * This method handles all MLS message types:
+   * - ApplicationMessage: Returns decrypted content
+   * - Proposal: Stores as pending proposal, returns empty content
+   * - Commit: Merges the staged commit, returns empty content
+   */
+  process_message(provider: Provider, msg: Uint8Array): ProcessedMessage;
+  /**
+   * Process message and return raw bytes (legacy API, for backwards compatibility)
+   *
+   * Returns decrypted bytes for application messages, empty for proposals/commits.
+   */
+  process_message_raw(provider: Provider, msg: Uint8Array): Uint8Array;
+  /**
+   * Propose adding a new member (does NOT commit immediately)
+   *
+   * Use this when you want to batch multiple proposals before committing.
+   * Call `commit_pending_proposals` after queuing all proposals.
+   */
+  propose_add_member(provider: Provider, sender: Identity, new_member: KeyPackage): ProposalMessage;
+  /**
+   * Propose removing a member by leaf index
+   *
+   * Use `member_by_user_id` to get the leaf index from a user_id.
+   */
+  propose_remove_member(provider: Provider, sender: Identity, member_index: number): ProposalMessage;
+  /**
+   * Propose removing a member by user_id
+   *
+   * This is a convenience method that finds the member by credential
+   * and proposes their removal.
+   */
+  propose_remove_member_by_user_id(provider: Provider, sender: Identity, user_id: string): ProposalMessage;
+  /**
+   * Propose a self-update (key rotation for forward secrecy)
+   */
+  propose_self_update(provider: Provider, sender: Identity): ProposalMessage;
+  /**
+   * Get the number of pending proposals
+   */
+  pending_proposals_count(): number;
+  /**
+   * Clear all pending proposals without committing
+   */
+  clear_pending_proposals(provider: Provider): void;
+  /**
+   * Get the CID (group_id as string)
+   *
+   * This returns the original cid string used to create the group,
+   * matching the Ermis channel cid format (e.g., "team:channel_abc123")
+   */
+  cid(): string;
+  /**
+   * Get the raw group_id bytes
+   */
+  group_id(): Uint8Array;
+  /**
+   * Get current epoch number
+   *
+   * Epoch increases with each commit
+   */
+  epoch(): bigint;
+  /**
+   * Get all members in the group
+   */
+  members(): MemberInfo[];
+  /**
+   * Get a member by user_id
+   */
+  member_by_user_id(user_id: string): MemberInfo | undefined;
+  /**
+   * Get the local member's leaf index
+   */
+  own_leaf_index(): number;
+  /**
+   * Check if the group is in operational state
+   *
+   * Returns false if there's a pending commit or the group is inactive
+   */
+  is_operational(): boolean;
+  /**
+   * Check if there's a pending commit that hasn't been merged
+   */
+  has_pending_commit(): boolean;
+  /**
+   * Export the ratchet tree for sharing with new members
+   */
+  export_ratchet_tree(): RatchetTree;
+  /**
+   * Export group info for external commits
+   *
+   * # Arguments
+   * * `with_ratchet_tree` - Whether to include the ratchet tree in the group info
+   */
+  export_group_info(provider: Provider, sender: Identity, with_ratchet_tree: boolean): Uint8Array;
+  /**
+   * Export a secret key derived from the group state
+   *
+   * Useful for deriving encryption keys for media streams, etc.
+   */
+  export_key(provider: Provider, label: string, context: Uint8Array, key_length: number): Uint8Array;
+  /**
+   * Create a new group with a CID from Ermis
+   *
+   * # Arguments
+   * * `provider` - Crypto provider
+   * * `founder` - Identity of the group creator
+   * * `cid` - Channel ID from Ermis (e.g., "team:channel_abc123")
+   *
+   * # Example
+   * ```javascript
+   * const group = Group.create_with_cid(provider, identity, "team:my_channel");
+   * ```
+   */
+  static create_with_cid(provider: Provider, founder: Identity, cid: string): Group;
+  /**
+   * Create a new group (legacy API, uses group_id string directly)
+   */
+  static create_new(provider: Provider, founder: Identity, group_id: string): Group;
+  /**
+   * Join a group using a Welcome message
+   *
+   * # Arguments
+   * * `provider` - Crypto provider
+   * * `welcome` - Serialized Welcome message bytes
+   * * `ratchet_tree` - Optional ratchet tree (if not embedded in welcome)
+   */
+  static join_with_welcome(provider: Provider, welcome: Uint8Array, ratchet_tree?: RatchetTree | null): Group;
+  /**
+   * Join a group using a Welcome (legacy API)
+   */
+  static join(provider: Provider, welcome: Uint8Array, ratchet_tree: RatchetTree): Group;
+  /**
+   * Join a group via External Commit
+   *
+   * This allows a user to join a group without needing a Welcome message,
+   * using only the GroupInfo.
+   *
+   * # Arguments
+   * * `provider` - Crypto provider
+   * * `identity` - Identity of the joiner
+   * * `group_info` - Serialized GroupInfo bytes
+   * * `ratchet_tree` - Optional ratchet tree
+   *
+   * # Returns
+   * ExternalJoinResult containing the joined group and commit message to broadcast
+   */
+  static join_external(provider: Provider, identity: Identity, group_info: Uint8Array, ratchet_tree?: RatchetTree | null): ExternalJoinResult;
+}
+/**
+ * Represents a user's MLS identity with credentials and signing keys
+ */
+export class Identity {
+  free(): void;
+  /**
+   * Create a new identity for a user
+   *
+   * # Arguments
+   * * `provider` - The crypto provider
+   * * `user_id` - Unique identifier for the user (e.g., from Ermis user system)
+   */
+  constructor(provider: Provider, user_id: string);
+  /**
+   * Generate a single key package for this identity
+   */
+  key_package(provider: Provider): KeyPackage;
+  /**
+   * Generate multiple key packages for multi-device support
+   *
+   * # Arguments
+   * * `provider` - The crypto provider
+   * * `count` - Number of key packages to generate
+   */
+  key_packages(provider: Provider, count: number): KeyPackage[];
+  /**
+   * Serialize identity for storage
+   * Note: This only exports the keypair, credential will be reconstructed
+   */
+  to_bytes(): Uint8Array;
+  /**
+   * Restore identity from bytes
+   */
+  static from_bytes(provider: Provider, bytes: Uint8Array): Identity;
+  /**
+   * Get the user_id from this identity
+   */
+  readonly user_id: string;
+}
+/**
+ * A KeyPackage for joining groups
+ */
+export class KeyPackage {
+  private constructor();
+  free(): void;
+  /**
+   * Serialize this KeyPackage to bytes
+   */
+  to_bytes(): Uint8Array;
+  /**
+   * Deserialize a KeyPackage from bytes
+   */
+  static from_bytes(bytes: Uint8Array): KeyPackage;
+  /**
+   * Get the hash reference of this key package
+   */
+  hash_ref(provider: Provider): Uint8Array;
+}
+/**
+ * Information about a group member
+ */
+export class MemberInfo {
+  private constructor();
+  free(): void;
+  /**
+   * Get the member's leaf index
+   */
+  readonly index: number;
+  /**
+   * Get the member's user_id
+   */
+  readonly user_id: string;
+  /**
+   * Get the member's encryption key
+   */
+  readonly encryption_key: Uint8Array;
+  /**
+   * Get the member's signature key
+   */
+  readonly signature_key: Uint8Array;
+}
+/**
+ * Custom error type for MLS operations
+ */
+export class MlsError {
+  free(): void;
+  /**
+   * Create a new MlsError
+   */
+  constructor(code: MlsErrorCode, message: string);
+  /**
+   * Get error code
+   */
+  readonly code: MlsErrorCode;
+  /**
+   * Get error message
+   */
+  readonly message: string;
+}
+/**
+ * Result of processing an incoming message
+ */
+export class ProcessedMessage {
+  private constructor();
+  free(): void;
+  /**
+   * Check if this is an application message
+   */
+  is_application_message(): boolean;
+  /**
+   * Check if this is a proposal
+   */
+  is_proposal(): boolean;
+  /**
+   * Check if this is a commit
+   */
+  is_commit(): boolean;
+  /**
+   * Get the type of message
+   */
+  readonly message_type: MessageType;
+  /**
+   * Get the decrypted content (only for ApplicationMessage)
+   */
+  readonly content: Uint8Array | undefined;
+  /**
+   * Get the sender's leaf index
+   */
+  readonly sender_index: number;
+  /**
+   * Get the epoch this message belongs to
+   */
+  readonly epoch: bigint;
+  /**
+   * Get the Additional Authenticated Data (AAD) from the message
+   * This is the metadata that was bound to the ciphertext during encryption
+   */
+  readonly aad: Uint8Array;
+}
+/**
+ * A proposal message that can be sent to other group members
+ */
+export class ProposalMessage {
+  private constructor();
+  free(): void;
+  /**
+   * Get bytes as Uint8Array for JavaScript
+   */
+  bytes_as_uint8array(): Uint8Array;
+  /**
+   * Get the serialized proposal message bytes
+   */
+  readonly bytes: Uint8Array;
+  /**
+   * Get the proposal reference for tracking
+   */
+  readonly proposal_ref: Uint8Array;
+}
+/**
+ * Crypto provider for MLS operations
+ */
+export class Provider {
+  free(): void;
+  constructor();
+}
+/**
+ * Ratchet tree for group state synchronization
+ */
+export class RatchetTree {
+  private constructor();
+  free(): void;
+  /**
+   * Serialize this RatchetTree to bytes
+   */
+  to_bytes(): Uint8Array;
+  /**
+   * Deserialize a RatchetTree from bytes
+   */
+  static from_bytes(bytes: Uint8Array): RatchetTree;
+}
+
+export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
+
+export interface InitOutput {
+  readonly memory: WebAssembly.Memory;
+  readonly __wbg_mlserror_free: (a: number, b: number) => void;
+  readonly mlserror_new: (a: number, b: number, c: number) => number;
+  readonly mlserror_code: (a: number) => number;
+  readonly mlserror_message: (a: number) => [number, number];
+  readonly __wbg_ratchettree_free: (a: number, b: number) => void;
+  readonly ratchettree_to_bytes: (a: number) => [number, number];
+  readonly ratchettree_from_bytes: (a: number, b: number) => [number, number, number];
+  readonly __wbg_provider_free: (a: number, b: number) => void;
+  readonly provider_new: () => number;
+  readonly greet: () => void;
+  readonly init: () => void;
+  readonly __wbg_commitbundle_free: (a: number, b: number) => void;
+  readonly commitbundle_commit: (a: number) => [number, number];
+  readonly commitbundle_welcome: (a: number) => [number, number];
+  readonly commitbundle_group_info: (a: number) => [number, number];
+  readonly commitbundle_has_welcome: (a: number) => number;
+  readonly commitbundle_commit_as_uint8array: (a: number) => any;
+  readonly commitbundle_welcome_as_uint8array: (a: number) => any;
+  readonly group_commit_pending_proposals: (a: number, b: number, c: number) => [number, number, number];
+  readonly group_merge_pending_commit: (a: number, b: number) => [number, number];
+  readonly group_clear_pending_commit: (a: number, b: number) => [number, number];
+  readonly group_add_members: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+  readonly group_remove_members: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+  readonly group_self_update: (a: number, b: number, c: number) => [number, number, number];
+  readonly group_propose_and_commit_add: (a: number, b: number, c: number, d: number) => [number, number, number];
+  readonly __wbg_addmessages_free: (a: number, b: number) => void;
+  readonly addmessages_proposal: (a: number) => any;
+  readonly addmessages_commit: (a: number) => any;
+  readonly addmessages_welcome: (a: number) => any;
+  readonly __wbg_processedmessage_free: (a: number, b: number) => void;
+  readonly processedmessage_message_type: (a: number) => number;
+  readonly processedmessage_content: (a: number) => [number, number];
+  readonly processedmessage_sender_index: (a: number) => number;
+  readonly processedmessage_epoch: (a: number) => bigint;
+  readonly processedmessage_aad: (a: number) => [number, number];
+  readonly processedmessage_is_application_message: (a: number) => number;
+  readonly processedmessage_is_proposal: (a: number) => number;
+  readonly processedmessage_is_commit: (a: number) => number;
+  readonly group_create_message: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+  readonly group_set_aad: (a: number, b: number, c: number) => void;
+  readonly group_create_message_with_aad: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+  readonly group_process_message: (a: number, b: number, c: number, d: number) => [number, number, number];
+  readonly group_process_message_raw: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+  readonly __wbg_proposalmessage_free: (a: number, b: number) => void;
+  readonly proposalmessage_bytes: (a: number) => [number, number];
+  readonly proposalmessage_proposal_ref: (a: number) => [number, number];
+  readonly proposalmessage_bytes_as_uint8array: (a: number) => any;
+  readonly group_propose_add_member: (a: number, b: number, c: number, d: number) => [number, number, number];
+  readonly group_propose_remove_member: (a: number, b: number, c: number, d: number) => [number, number, number];
+  readonly group_propose_remove_member_by_user_id: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+  readonly group_propose_self_update: (a: number, b: number, c: number) => [number, number, number];
+  readonly group_pending_proposals_count: (a: number) => number;
+  readonly group_clear_pending_proposals: (a: number, b: number) => [number, number];
+  readonly __wbg_memberinfo_free: (a: number, b: number) => void;
+  readonly memberinfo_index: (a: number) => number;
+  readonly memberinfo_user_id: (a: number) => [number, number];
+  readonly memberinfo_encryption_key: (a: number) => [number, number];
+  readonly memberinfo_signature_key: (a: number) => [number, number];
+  readonly group_cid: (a: number) => [number, number, number, number];
+  readonly group_group_id: (a: number) => [number, number];
+  readonly group_epoch: (a: number) => bigint;
+  readonly group_members: (a: number) => [number, number];
+  readonly group_member_by_user_id: (a: number, b: number, c: number) => number;
+  readonly group_own_leaf_index: (a: number) => number;
+  readonly group_is_operational: (a: number) => number;
+  readonly group_has_pending_commit: (a: number) => number;
+  readonly group_export_ratchet_tree: (a: number) => number;
+  readonly group_export_group_info: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+  readonly group_export_key: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+  readonly __wbg_group_free: (a: number, b: number) => void;
+  readonly __wbg_externaljoinresult_free: (a: number, b: number) => void;
+  readonly externaljoinresult_group: (a: number) => number;
+  readonly externaljoinresult_commit: (a: number) => [number, number];
+  readonly group_create_with_cid: (a: number, b: number, c: number, d: number) => [number, number, number];
+  readonly group_create_new: (a: number, b: number, c: number, d: number) => number;
+  readonly group_join_with_welcome: (a: number, b: number, c: number, d: number) => [number, number, number];
+  readonly group_join: (a: number, b: number, c: number, d: number) => [number, number, number];
+  readonly group_join_external: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+  readonly __wbg_identity_free: (a: number, b: number) => void;
+  readonly identity_new: (a: number, b: number, c: number) => [number, number, number];
+  readonly identity_user_id: (a: number) => [number, number];
+  readonly identity_key_package: (a: number, b: number) => number;
+  readonly identity_key_packages: (a: number, b: number, c: number) => [number, number];
+  readonly identity_to_bytes: (a: number) => [number, number, number, number];
+  readonly identity_from_bytes: (a: number, b: number, c: number) => [number, number, number];
+  readonly __wbg_keypackage_free: (a: number, b: number) => void;
+  readonly keypackage_to_bytes: (a: number) => [number, number];
+  readonly keypackage_from_bytes: (a: number, b: number) => [number, number, number];
+  readonly keypackage_hash_ref: (a: number, b: number) => [number, number, number, number];
+  readonly __wbindgen_exn_store: (a: number) => void;
+  readonly __externref_table_alloc: () => number;
+  readonly __wbindgen_export_2: WebAssembly.Table;
+  readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+  readonly __wbindgen_malloc: (a: number, b: number) => number;
+  readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+  readonly __externref_table_dealloc: (a: number) => void;
+  readonly __externref_drop_slice: (a: number, b: number) => void;
+  readonly __wbindgen_start: () => void;
+}
+
+export type SyncInitInput = BufferSource | WebAssembly.Module;
+/**
+* Instantiates the given `module`, which can either be bytes or
+* a precompiled `WebAssembly.Module`.
+*
+* @param {{ module: SyncInitInput }} module - Passing `SyncInitInput` directly is deprecated.
+*
+* @returns {InitOutput}
+*/
+export function initSync(module: { module: SyncInitInput } | SyncInitInput): InitOutput;
+
+/**
+* If `module_or_path` is {RequestInfo} or {URL}, makes a request and
+* for everything else, calls `WebAssembly.instantiate` directly.
+*
+* @param {{ module_or_path: InitInput | Promise<InitInput> }} module_or_path - Passing `InitInput` directly is deprecated.
+*
+* @returns {Promise<InitOutput>}
+*/
+export default function __wbg_init (module_or_path?: { module_or_path: InitInput | Promise<InitInput> } | InitInput | Promise<InitInput>): Promise<InitOutput>;
