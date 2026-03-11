@@ -57,6 +57,24 @@ impl Group {
         })
     }
 
+    /// Load an existing group from persistent storage by its CID.
+    ///
+    /// Returns `None` (wrapped in `MlsError`) if the group is not found.
+    /// Use `Provider.storedGroupIds()` to discover which groups are available.
+    pub fn load_from_storage(provider: Arc<Provider>, cid: String) -> Result<Self, MlsError> {
+        let group_id_bytes = cid.bytes().collect::<Vec<_>>();
+        let group_id = GroupId::from_slice(&group_id_bytes);
+        let guard = provider.lock();
+
+        let mls_group = MlsGroup::load(guard.storage(), &group_id)
+            .map_err(|_| MlsError::StorageError)?
+            .ok_or(MlsError::GroupNotFound)?;
+
+        Ok(Group {
+            mls_group: Mutex::new(mls_group),
+        })
+    }
+
     /// Join a group using a Welcome message
     pub fn join_with_welcome(
         provider: Arc<Provider>,

@@ -20,6 +20,7 @@ pub use state::*;
 use openmls::{
     framing::{MlsMessageBodyIn, MlsMessageIn},
     group::{GroupId, MlsGroup, MlsGroupJoinConfig, StagedWelcome},
+    prelude::SenderRatchetConfiguration,
 };
 use tls_codec::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -78,6 +79,8 @@ impl Group {
             .ciphersuite(CIPHERSUITE)
             .with_group_id(GroupId::from_slice(&group_id_bytes))
             .use_ratchet_tree_extension(true)
+            // .max_past_epochs(5)
+            // .sender_ratchet_configuration(SenderRatchetConfiguration::new(5, 1000))
             .build(
                 &provider.0,
                 &founder.keypair,

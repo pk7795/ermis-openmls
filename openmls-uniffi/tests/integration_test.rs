@@ -301,3 +301,187 @@ fn test_remove_member() {
     // Alice's group should only have 1 member now
     assert_eq!(chess_club_alice.members().len(), 1);
 }
+
+// ============================================================================
+// Persistent Storage Tests
+// ============================================================================
+
+#[test]
+fn test_persistent_provider_creation() {
+    let dir = std::env::temp_dir().join("openmls_test_persistent.db");
+    let db_path = dir.to_str().unwrap().to_string();
+
+    // Clean up from previous runs
+    let _ = std::fs::remove_file(&db_path);
+
+    let provider = Arc::new(Provider::new_with_path(db_path.clone()).unwrap());
+    let identity = Arc::new(Identity::new(provider.clone(), "alice".to_string()).unwrap());
+    assert_eq!(identity.user_id(), "alice");
+
+    // Should be able to create a group
+    let group =
+        Group::create_with_cid(provider.clone(), identity.clone(), "test:persistent".into())
+            .unwrap();
+    assert_eq!(group.cid().unwrap(), "test:persistent");
+
+    // Clean up
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_persistent_provider_full_flow() {
+    let dir = std::env::temp_dir().join("openmls_test_full_flow.db");
+    let db_path = dir.to_str().unwrap().to_string();
+
+    // Clean up from previous runs
+    let _ = std::fs::remove_file(&db_path);
+
+    // Create two persistent providers (simulating two different users on the same device)
+    let alice_provider = Arc::new(Provider::new_with_path(db_path.clone()).unwrap());
+    let bob_provider = Arc::new(Provider::new());
+
+    let alice = Arc::new(Identity::new(alice_provider.clone(), "alice".to_string()).unwrap());
+    let bob = Arc::new(Identity::new(bob_provider.clone(), "bob".to_string()).unwrap());
+
+    // Create group and add bob
+    let group = Arc::new(
+        Group::create_with_cid(
+            alice_provider.clone(),
+            alice.clone(),
+            "team:persistent".into(),
+        )
+        .unwrap(),
+    );
+
+    let bob_kp = bob.key_package(bob_provider.clone());
+    let add_result = group
+        .add_members(alice_provider.clone(), alice.clone(), vec![bob_kp])
+        .unwrap();
+    group.merge_pending_commit(alice_provider.clone()).unwrap();
+
+    let welcome = add_result.welcome.expect("Should have welcome");
+    let ratchet_tree = group.export_ratchet_tree();
+
+    let bob_group = Arc::new(
+        Group::join_with_welcome(bob_provider.clone(), welcome, Some(ratchet_tree)).unwrap(),
+    );
+
+    // Messaging should work
+    let plaintext = b"Hello from persistent storage!";
+    let ciphertext = group
+        .create_message(alice_provider.clone(), alice, plaintext.to_vec())
+        .unwrap();
+
+    let processed = bob_group.process_message(bob_provider, ciphertext).unwrap();
+
+    assert_eq!(processed.message_type, MessageType::ApplicationMessage);
+    assert_eq!(processed.content.unwrap(), plaintext.to_vec());
+
+    // Clean up
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_load_group_from_storage() {
+    let dir = std::env::temp_dir().join("openmls_test_load_group.db");
+    let db_path = dir.to_str().unwrap().to_string();
+    let _ = std::fs::remove_file(&db_path);
+
+    let cid = "test:load_group";
+
+    // Phase 1: Create group with persistent provider
+    let provider = Arc::new(Provider::new_with_path(db_path.clone()).unwrap());
+    let alice = Arc::new(Identity::new(provider.clone(), "alice".to_string()).unwrap());
+
+    let group = Group::create_with_cid(provider.clone(), alice.clone(), cid.into()).unwrap();
+    assert_eq!(group.cid().unwrap(), cid);
+    assert_eq!(group.epoch(), 0);
+
+    // Verify stored_group_ids returns the CID
+    let ids = provider.stored_group_ids().unwrap();
+    assert!(
+        ids.contains(&cid.to_string()),
+        "Expected CID in stored groups: {:?}",
+        ids
+    );
+
+    // Phase 2: Load the group from storage (simulate app restart with same DB)
+    let loaded = Group::load_from_storage(provider.clone(), cid.into()).unwrap();
+    assert_eq!(loaded.cid().unwrap(), cid);
+    assert_eq!(loaded.epoch(), 0);
+    assert_eq!(loaded.members().len(), 1);
+
+    // Clean up
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_group_management() {
+    let dir = std::env::temp_dir().join("openmls_test_group_mgmt.db");
+    let db_path = dir.to_str().unwrap().to_string();
+    let _ = std::fs::remove_file(&db_path);
+
+    let provider = Arc::new(Provider::new_with_path(db_path.clone()).unwrap());
+    let alice = Arc::new(Identity::new(provider.clone(), "alice".to_string()).unwrap());
+
+    // Initially no groups
+    assert_eq!(provider.group_count().unwrap(), 0);
+    assert!(provider.stored_group_ids().unwrap().is_empty());
+
+    // Create 2 groups
+    let _g1 = Group::create_with_cid(provider.clone(), alice.clone(), "ch:one".into()).unwrap();
+    let _g2 = Group::create_with_cid(provider.clone(), alice.clone(), "ch:two".into()).unwrap();
+
+    assert_eq!(provider.group_count().unwrap(), 2);
+    let ids = provider.stored_group_ids().unwrap();
+    assert!(ids.contains(&"ch:one".to_string()));
+    assert!(ids.contains(&"ch:two".to_string()));
+
+    // Delete one group
+    provider.delete_group("ch:one".into()).unwrap();
+    assert_eq!(provider.group_count().unwrap(), 1);
+    let ids = provider.stored_group_ids().unwrap();
+    assert!(!ids.contains(&"ch:one".to_string()));
+    assert!(ids.contains(&"ch:two".to_string()));
+
+    // Delete all
+    provider.delete_all_groups().unwrap();
+    assert_eq!(provider.group_count().unwrap(), 0);
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_identity_persistence() {
+    let dir = std::env::temp_dir().join("openmls_test_identity_persist.db");
+    let db_path = dir.to_str().unwrap().to_string();
+    let _ = std::fs::remove_file(&db_path);
+
+    let provider = Arc::new(Provider::new_with_path(db_path.clone()).unwrap());
+
+    // Initially no identity
+    assert!(provider.load_identity().unwrap().is_none());
+
+    // Create identity and store it
+    let alice = Arc::new(Identity::new(provider.clone(), "alice".to_string()).unwrap());
+    let identity_bytes = alice.to_bytes().unwrap();
+    provider
+        .store_identity("alice".to_string(), identity_bytes.clone())
+        .unwrap();
+
+    // Load identity back
+    let loaded = provider.load_identity().unwrap();
+    assert!(loaded.is_some());
+    let loaded_bytes = loaded.unwrap();
+    assert_eq!(loaded_bytes, identity_bytes);
+
+    // Restore identity from loaded bytes
+    let restored = Identity::from_bytes(provider.clone(), loaded_bytes).unwrap();
+    assert_eq!(restored.user_id(), "alice");
+
+    // Delete identity
+    provider.delete_identity().unwrap();
+    assert!(provider.load_identity().unwrap().is_none());
+
+    let _ = std::fs::remove_file(&db_path);
+}

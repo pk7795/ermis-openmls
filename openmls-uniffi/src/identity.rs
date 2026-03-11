@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use openmls_traits::storage::StorageProvider;
+
 use openmls::{
     credentials::{BasicCredential, CredentialWithKey},
     key_packages::KeyPackage as OpenMlsKeyPackage,
@@ -113,6 +115,12 @@ impl Identity {
             .map_err(|_| MlsError::DeserializationError)?;
 
         let guard = provider.lock();
+        // Delete any existing entry first — SqliteStorageProvider uses INSERT
+        // (not INSERT OR REPLACE), so re-storing the same public key would
+        // violate the UNIQUE constraint.
+        let _ = guard
+            .storage()
+            .delete_signature_key_pair::<openmls_basic_credential::StorageId>(&keypair.id());
         keypair
             .store(guard.storage())
             .map_err(|_| MlsError::StorageError)?;

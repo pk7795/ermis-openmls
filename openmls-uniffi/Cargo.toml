@@ -20,6 +20,10 @@ openmls = { path = "../openmls" }
 openmls_traits = { path = "../traits" }
 openmls_rust_crypto = { path = "../openmls_rust_crypto" }
 openmls_basic_credential = { path = "../basic_credential" }
+openmls_sqlite_storage = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 tls_codec = { workspace = true }
 thiserror = "1"
 

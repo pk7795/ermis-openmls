@@ -13,6 +13,7 @@ enum MlsError {
     "NoWelcome",
     "InvalidCid",
     "StorageError",
+    "GroupNotFound",
     "CryptoError",
     "InvalidState",
     "ExternalCommitError",
@@ -58,6 +59,32 @@ dictionary ExternalJoinResult {
 
 interface Provider {
     constructor();
+
+    [Throws=MlsError, Name=new_with_path]
+    constructor(string db_path);
+
+    // Group queries & management
+    [Throws=MlsError]
+    sequence<string> stored_group_ids();
+
+    [Throws=MlsError]
+    u32 group_count();
+
+    [Throws=MlsError]
+    void delete_group(string cid);
+
+    [Throws=MlsError]
+    void delete_all_groups();
+
+    // Identity persistence
+    [Throws=MlsError]
+    void store_identity(string user_id, bytes identity_bytes);
+
+    [Throws=MlsError]
+    bytes? load_identity();
+
+    [Throws=MlsError]
+    void delete_identity();
 };
 
 interface Identity {
@@ -98,6 +125,9 @@ interface Group {
 
     [Throws=MlsError, Name=join_with_welcome]
     constructor(Provider provider, bytes welcome, RatchetTree? ratchet_tree);
+
+    [Throws=MlsError, Name=load_from_storage]
+    constructor(Provider provider, string cid);
 
     // State
     [Throws=MlsError]
