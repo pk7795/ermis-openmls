@@ -20,12 +20,12 @@ pub use state::*;
 use openmls::{
     framing::{MlsMessageBodyIn, MlsMessageIn},
     group::{GroupId, MlsGroup, MlsGroupJoinConfig, StagedWelcome},
-    prelude::SenderRatchetConfiguration,
 };
 use tls_codec::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 use crate::{identity::Identity, types::RatchetTree, Provider, CIPHERSUITE};
+use openmls_traits::OpenMlsProvider;
 
 /// An MLS Group representing an encrypted channel
 #[wasm_bindgen]
@@ -87,6 +87,25 @@ impl Group {
                 founder.credential_with_key.clone(),
             )
             .map_err(|e| JsError::new(&format!("Failed to create group: {e}")))?;
+
+        Ok(Group { mls_group })
+    }
+
+    /// Load a group from the Provider's storage by CID
+    ///
+    /// After restoring a Provider from bytes (IndexedDB), call this to reopen
+    /// a group that was previously created or joined.
+    ///
+    /// # Arguments
+    /// * `provider` - Crypto provider (restored from bytes)
+    /// * `cid` - Channel ID (e.g., "team:channel_abc123")
+    pub fn load(provider: &Provider, cid: &str) -> Result<Group, JsError> {
+        let group_id_bytes = cid.bytes().collect::<Vec<_>>();
+        let group_id = GroupId::from_slice(&group_id_bytes);
+
+        let mls_group = MlsGroup::load(provider.0.storage(), &group_id)
+            .map_err(|e| JsError::new(&format!("Failed to load group: {e}")))?
+            .ok_or_else(|| JsError::new(&format!("Group not found in storage: {cid}")))?;
 
         Ok(Group { mls_group })
     }

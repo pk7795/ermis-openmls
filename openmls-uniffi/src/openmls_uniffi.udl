@@ -1,6 +1,8 @@
 namespace openmls_uniffi {
     [Throws=MlsError]
     ExternalJoinResult join_external(Provider provider, Identity identity, bytes group_info, RatchetTree? ratchet_tree);
+
+    boolean validate_key_package_bytes(bytes data);
 };
 
 [Error]
@@ -136,6 +138,7 @@ interface Group {
     u64 epoch();
     sequence<MemberInfo> members();
     MemberInfo? member_by_user_id(string user_id);
+    sequence<MemberInfo> members_by_user_id(string user_id);
     u32 own_leaf_index();
     boolean is_operational();
     boolean has_pending_commit();
@@ -159,9 +162,15 @@ interface Group {
     [Throws=MlsError]
     ProcessedMessage process_message(Provider provider, bytes msg);
 
+    [Throws=MlsError]
+    bytes process_message_raw(Provider provider, bytes msg);
+
     // Proposals
     [Throws=MlsError]
     ProposalMessage propose_add_member(Provider provider, Identity sender, KeyPackage new_member);
+
+    [Throws=MlsError]
+    sequence<ProposalMessage> propose_add_user(Provider provider, Identity sender, sequence<KeyPackage> device_key_packages);
 
     [Throws=MlsError]
     ProposalMessage propose_remove_member(Provider provider, Identity sender, u32 member_index);
@@ -191,7 +200,16 @@ interface Group {
     CommitBundle add_members(Provider provider, Identity sender, sequence<KeyPackage> new_members);
 
     [Throws=MlsError]
+    CommitBundle add_user(Provider provider, Identity sender, sequence<KeyPackage> device_key_packages);
+
+    [Throws=MlsError]
     CommitBundle remove_members(Provider provider, Identity sender, sequence<u32> member_indices);
+
+    [Throws=MlsError]
+    CommitBundle remove_user(Provider provider, Identity sender, string user_id);
+
+    [Throws=MlsError]
+    sequence<ProposalMessage> propose_remove_user(Provider provider, Identity sender, string user_id);
 
     [Throws=MlsError]
     CommitBundle self_update(Provider provider, Identity sender);

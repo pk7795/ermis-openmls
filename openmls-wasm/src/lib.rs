@@ -42,6 +42,7 @@ pub use types::*;
 
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::types::Ciphersuite;
+use openmls_traits::OpenMlsProvider;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -78,6 +79,30 @@ impl Provider {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Serialize the key store to bytes for persistence (e.g. IndexedDB)
+    ///
+    /// Returns the serialized key store as a byte array.
+    /// Use `Provider.from_bytes()` to restore.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, JsError> {
+        let mut buf = Vec::new();
+        self.0.storage().serialize(&mut buf)
+            .map_err(|e| JsError::new(&format!("Failed to serialize Provider: {}", e)))?;
+        Ok(buf)
+    }
+
+    /// Restore a Provider from previously serialized bytes
+    ///
+    /// The crypto provider (RNG) is always fresh; only the key store
+    /// (private keys, group state, etc.) is restored from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Provider, JsError> {
+        let storage = openmls_rust_crypto::MemoryStorage::deserialize(
+            &mut std::io::Cursor::new(bytes),
+        )
+        .map_err(|e| JsError::new(&format!("Failed to deserialize Provider: {}", e)))?;
+
+        Ok(Provider(OpenMlsRustCrypto::new_with_storage(storage)))
     }
 }
 
@@ -266,5 +291,31 @@ mod tests {
         let restored = Identity::from_bytes(&provider, &bytes).unwrap();
 
         assert_eq!(restored.user_id(), "alice_user_123");
+    }
+
+    #[test]
+    fn test_provider_serialization_roundtrip() {
+        // Create a provider and generate some state (identity + key package)
+        let provider = Provider::new();
+        let alice = Identity::new(&provider, "alice").unwrap();
+        let _kp = alice.key_package(&provider);
+
+        // Serialize and restore
+        let bytes = provider.to_bytes().unwrap();
+        assert!(!bytes.is_empty());
+
+        let restored = Provider::from_bytes(&bytes).unwrap();
+
+        // The restored provider should still have Alice's signature key pair
+        // which means we can create new key packages with it
+        let alice_restored = Identity::from_bytes(
+            &restored,
+            &alice.to_bytes().unwrap(),
+        ).unwrap();
+        assert_eq!(alice_restored.user_id(), "alice");
+
+        // Generate a new key package from restored provider — would panic
+        // if the signature key pair wasn't restored
+        let _kp2 = alice_restored.key_package(&restored);
     }
 }

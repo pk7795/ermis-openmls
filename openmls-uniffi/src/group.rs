@@ -146,9 +146,19 @@ impl Group {
             .collect()
     }
 
-    /// Get a member by user_id
+    /// Get a member by user_id (returns first match)
     pub fn member_by_user_id(&self, user_id: String) -> Option<MemberInfo> {
         self.members().into_iter().find(|m| m.user_id == user_id)
+    }
+
+    /// Get ALL members (leaf nodes) for a given user_id
+    ///
+    /// A user with N devices will have N entries in the group.
+    pub fn members_by_user_id(&self, user_id: String) -> Vec<MemberInfo> {
+        self.members()
+            .into_iter()
+            .filter(|m| m.user_id == user_id)
+            .collect()
     }
 
     /// Get the local member's leaf index
@@ -339,6 +349,18 @@ impl Group {
         }
     }
 
+    /// Process message and return raw bytes (legacy API, for backwards compatibility)
+    ///
+    /// Returns decrypted bytes for application messages, empty for proposals/commits.
+    pub fn process_message_raw(
+        &self,
+        provider: Arc<Provider>,
+        msg: Vec<u8>,
+    ) -> Result<Vec<u8>, MlsError> {
+        let processed = self.process_message(provider, msg)?;
+        Ok(processed.content.unwrap_or_default())
+    }
+
     // ========================================================================
     // Proposals
     // ========================================================================
@@ -368,6 +390,44 @@ impl Group {
         })
     }
 
+    /// Propose adding a user with multiple devices (does NOT commit immediately)
+    ///
+    /// Each KeyPackage represents one device. Creates one add proposal
+    /// per device, all queued as pending proposals.
+    /// Call `commit_pending_proposals` to batch them into a single commit.
+    pub fn propose_add_user(
+        &self,
+        provider: Arc<Provider>,
+        sender: Arc<Identity>,
+        device_key_packages: Vec<Arc<KeyPackage>>,
+    ) -> Result<Vec<ProposalMessage>, MlsError> {
+        if device_key_packages.is_empty() {
+            return Err(MlsError::InvalidState);
+        }
+
+        let mut group = self.mls_group.lock().unwrap();
+        let prov_guard = provider.lock();
+
+        let mut proposals = Vec::with_capacity(device_key_packages.len());
+        for kp in &device_key_packages {
+            let (proposal_msg, proposal_ref) = group
+                .propose_add_member(&*prov_guard, &sender.keypair, &kp.inner)
+                .map_err(|_| MlsError::InternalError)?;
+
+            let mut serialized = vec![];
+            proposal_msg
+                .tls_serialize(&mut serialized)
+                .map_err(|_| MlsError::SerializationError)?;
+
+            proposals.push(ProposalMessage {
+                bytes: serialized,
+                proposal_ref: proposal_ref.as_slice().to_vec(),
+            });
+        }
+
+        Ok(proposals)
+    }
+
     /// Propose removing a member by leaf index
     pub fn propose_remove_member(
         &self,
@@ -395,6 +455,8 @@ impl Group {
     }
 
     /// Propose removing a member by user_id
+    /// Note: This only removes ONE leaf node. For multi-device users,
+    /// use `propose_remove_user` instead.
     pub fn propose_remove_member_by_user_id(
         &self,
         provider: Arc<Provider>,
@@ -420,6 +482,51 @@ impl Group {
             bytes: serialized,
             proposal_ref: proposal_ref.as_slice().to_vec(),
         })
+    }
+
+    /// Propose removing ALL devices of a user by user_id
+    ///
+    /// A user with N devices will have N leaf nodes. This creates
+    /// one remove proposal per device. Call `commit_pending_proposals`
+    /// after this to finalize all removals in a single commit.
+    pub fn propose_remove_user(
+        &self,
+        provider: Arc<Provider>,
+        sender: Arc<Identity>,
+        user_id: String,
+    ) -> Result<Vec<ProposalMessage>, MlsError> {
+        let member_indices: Vec<u32> = self
+            .members_by_user_id(user_id.clone())
+            .iter()
+            .map(|m| m.index)
+            .collect();
+
+        if member_indices.is_empty() {
+            return Err(MlsError::MemberNotFound);
+        }
+
+        let mut group = self.mls_group.lock().unwrap();
+        let prov_guard = provider.lock();
+
+        let mut proposals = Vec::with_capacity(member_indices.len());
+        for index in member_indices {
+            let leaf_index = LeafNodeIndex::new(index);
+            let (proposal_msg, proposal_ref) = group
+                .propose_remove_member(&*prov_guard, &sender.keypair, leaf_index)
+                .map_err(|_| MlsError::InternalError)?;
+
+            let mut serialized = vec![];
+            proposal_msg
+                .tls_serialize(&mut serialized)
+                .map_err(|_| MlsError::SerializationError)?;
+
+            proposals.push(ProposalMessage {
+                bytes: serialized,
+                proposal_ref: proposal_ref.as_slice().to_vec(),
+            });
+        }
+
+        Ok(proposals)
     }
 
     /// Propose a self-update (key rotation)
@@ -545,6 +652,22 @@ impl Group {
         })
     }
 
+    /// Add a user with multiple devices and commit immediately
+    ///
+    /// Each KeyPackage represents one device of the same user.
+    /// All devices are added in a single commit.
+    pub fn add_user(
+        &self,
+        provider: Arc<Provider>,
+        sender: Arc<Identity>,
+        device_key_packages: Vec<Arc<KeyPackage>>,
+    ) -> Result<CommitBundle, MlsError> {
+        if device_key_packages.is_empty() {
+            return Err(MlsError::InvalidState);
+        }
+        self.add_members(provider, sender, device_key_packages)
+    }
+
     /// Remove members and commit immediately
     pub fn remove_members(
         &self,
@@ -565,6 +688,29 @@ impl Group {
             .map_err(|_| MlsError::InternalError)?;
 
         serialize_commit_bundle(&commit_msg, welcome_msg.as_ref(), group_info.as_ref())
+    }
+
+    /// Remove ALL devices of a user by user_id and commit immediately
+    ///
+    /// A user with N devices will have N leaf nodes in the group.
+    /// This method finds all of them and removes them in a single commit.
+    pub fn remove_user(
+        &self,
+        provider: Arc<Provider>,
+        sender: Arc<Identity>,
+        user_id: String,
+    ) -> Result<CommitBundle, MlsError> {
+        let member_indices: Vec<u32> = self
+            .members_by_user_id(user_id.clone())
+            .iter()
+            .map(|m| m.index)
+            .collect();
+
+        if member_indices.is_empty() {
+            return Err(MlsError::MemberNotFound);
+        }
+
+        self.remove_members(provider, sender, member_indices)
     }
 
     /// Key rotation with immediate commit

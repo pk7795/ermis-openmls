@@ -2,7 +2,6 @@ use openmls_traits::storage::*;
 use serde::Serialize;
 use std::{collections::HashMap, sync::RwLock};
 
-#[cfg(feature = "test-utils")]
 use std::io::Write as _;
 
 /// A storage for the V_TEST version.
@@ -28,8 +27,7 @@ impl Clone for MemoryStorage {
     }
 }
 
-// For testing (KATs in particular) we want to serialize and deserialize the storage
-#[cfg(feature = "test-utils")]
+// Serialize/deserialize the key store for persistence (e.g. IndexedDB in WASM)
 impl MemoryStorage {
     pub fn serialize(&self, w: &mut Vec<u8>) -> std::io::Result<usize> {
         let values = self.values.read().unwrap();

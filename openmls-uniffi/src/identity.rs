@@ -176,3 +176,13 @@ impl KeyPackage {
         Ok(hash_ref.as_slice().to_vec())
     }
 }
+
+/// Validate raw key package bytes without constructing a KeyPackage object.
+///
+/// Performs full validation: TLS deserialization, signature verification,
+/// protocol version check, lifetime check, init_key ≠ encryption_key.
+///
+/// Returns `true` if the KeyPackage is valid, `false` otherwise.
+pub fn validate_key_package_bytes(data: Vec<u8>) -> bool {
+    KeyPackage::from_bytes(data).is_ok()
+}

@@ -168,6 +168,22 @@ impl Group {
         ))
     }
 
+    /// Add a user with multiple devices and commit immediately
+    ///
+    /// Each KeyPackage represents one device of the same user.
+    /// All devices are added in a single commit.
+    pub fn add_user(
+        &mut self,
+        provider: &Provider,
+        sender: &Identity,
+        device_key_packages: Vec<KeyPackage>,
+    ) -> Result<CommitBundle, JsError> {
+        if device_key_packages.is_empty() {
+            return Err(JsError::new("At least one KeyPackage is required"));
+        }
+        self.add_members(provider, sender, device_key_packages)
+    }
+
     /// Remove members and commit immediately (convenience method)
     pub fn remove_members(
         &mut self,
@@ -189,6 +205,29 @@ impl Group {
             welcome_msg,
             group_info,
         ))
+    }
+
+    /// Remove ALL devices of a user by user_id and commit immediately
+    ///
+    /// A user with N devices will have N leaf nodes in the group.
+    /// This method finds all of them and removes them in a single commit.
+    pub fn remove_user(
+        &mut self,
+        provider: &Provider,
+        sender: &Identity,
+        user_id: &str,
+    ) -> Result<CommitBundle, JsError> {
+        let member_indices: Vec<u32> = self
+            .members_by_user_id(user_id)
+            .iter()
+            .map(|m| m.index())
+            .collect();
+
+        if member_indices.is_empty() {
+            return Err(JsError::new(&format!("No members found for user_id: {user_id}")));
+        }
+
+        self.remove_members(provider, sender, &member_indices)
     }
 
     /// Key rotation with immediate commit (convenience method)
@@ -226,7 +265,7 @@ impl Group {
             self.mls_group
                 .propose_add_member(provider.as_ref(), &sender.keypair, &new_member.0)?;
 
-        let (commit_msg, welcome_msg, _group_info) = self
+        let (commit_msg, welcome_msg, group_info) = self
             .mls_group
             .commit_to_pending_proposals(&provider.0, &sender.keypair)?;
 
@@ -236,10 +275,17 @@ impl Group {
         let commit = mls_message_to_uint8array(&commit_msg);
         let welcome = mls_message_to_uint8array(&welcome_msg);
 
+        let group_info_bytes = group_info.map(|gi| {
+            let mut bytes = vec![];
+            gi.tls_serialize(&mut bytes).unwrap();
+            bytes
+        });
+
         Ok(AddMessages {
             proposal,
             commit,
             welcome,
+            group_info: group_info_bytes,
         })
     }
 }
@@ -250,6 +296,7 @@ pub struct AddMessages {
     proposal: Uint8Array,
     commit: Uint8Array,
     welcome: Uint8Array,
+    group_info: Option<Vec<u8>>,
 }
 
 #[wasm_bindgen]
@@ -265,6 +312,10 @@ impl AddMessages {
     #[wasm_bindgen(getter)]
     pub fn welcome(&self) -> Uint8Array {
         self.welcome.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn group_info(&self) -> Option<Vec<u8>> {
+        self.group_info.clone()
     }
 }
 

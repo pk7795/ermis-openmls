@@ -70,6 +70,30 @@ impl Group {
         ))
     }
 
+    /// Propose adding a user with multiple devices (does NOT commit immediately)
+    ///
+    /// Each KeyPackage represents one device. Creates one add proposal
+    /// per device, all queued as pending proposals.
+    /// Call `commit_pending_proposals` to batch them into a single commit.
+    pub fn propose_add_user(
+        &mut self,
+        provider: &Provider,
+        sender: &Identity,
+        device_key_packages: Vec<crate::identity::KeyPackage>,
+    ) -> Result<Vec<ProposalMessage>, JsError> {
+        if device_key_packages.is_empty() {
+            return Err(JsError::new("At least one KeyPackage is required"));
+        }
+
+        let mut proposals = Vec::with_capacity(device_key_packages.len());
+        for kp in &device_key_packages {
+            let proposal = self.propose_add_member(provider, sender, kp)?;
+            proposals.push(proposal);
+        }
+
+        Ok(proposals)
+    }
+
     /// Propose removing a member by leaf index
     ///
     /// Use `member_by_user_id` to get the leaf index from a user_id.
@@ -94,6 +118,8 @@ impl Group {
     ///
     /// This is a convenience method that finds the member by credential
     /// and proposes their removal.
+    /// Note: This only removes ONE leaf node. For multi-device users,
+    /// use `propose_remove_user` instead.
     pub fn propose_remove_member_by_user_id(
         &mut self,
         provider: &Provider,
@@ -113,6 +139,38 @@ impl Group {
             &proposal_msg,
             proposal_ref.as_slice().to_vec(),
         ))
+    }
+
+    /// Propose removing ALL devices of a user by user_id
+    ///
+    /// A user with N devices will have N leaf nodes. This creates
+    /// one remove proposal per device. Call `commit_pending_proposals`
+    /// after this to finalize all removals in a single commit.
+    pub fn propose_remove_user(
+        &mut self,
+        provider: &Provider,
+        sender: &Identity,
+        user_id: &str,
+    ) -> Result<Vec<ProposalMessage>, JsError> {
+        let member_indices: Vec<u32> = self
+            .members_by_user_id(user_id)
+            .iter()
+            .map(|m| m.index())
+            .collect();
+
+        if member_indices.is_empty() {
+            return Err(JsError::new(&format!(
+                "No members found for user_id: {user_id}"
+            )));
+        }
+
+        let mut proposals = Vec::with_capacity(member_indices.len());
+        for index in member_indices {
+            let proposal = self.propose_remove_member(provider, sender, index)?;
+            proposals.push(proposal);
+        }
+
+        Ok(proposals)
     }
 
     /// Propose a self-update (key rotation for forward secrecy)

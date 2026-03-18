@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Shield, Users, Key, UserPlus, UserMinus, RefreshCw } from 'lucide-react';
+import { Shield, Users, Key, UserPlus, UserMinus, RefreshCw, UsersRound } from 'lucide-react';
 import ChatPanel from './components/ChatPanel';
 import LogPanel from './components/LogPanel';
 import {
@@ -23,6 +23,7 @@ import init, {
     Provider,
     Identity,
     Group,
+    KeyPackage,
 } from './wasm/openmls_wasm.js';
 
 const CHANNEL_CID = "team:demo_channel_001";
@@ -230,7 +231,153 @@ function App(): React.ReactElement {
         }
     }, [adminUserId, updateUser, addLog]);
 
-    // Remove member by user_id
+    // Batch add ALL pending members with Try-Filter-ReBatch fallback
+    const addMultipleMembersToGroup = useCallback(() => {
+        if (!adminUserId) return;
+        const currentUsers = usersRef.current;
+        const admin = currentUsers.get(adminUserId);
+        if (!admin?.group) return;
+
+        // Collect all users NOT yet in the group (excluding admin)
+        const pendingUsers: { userId: string; state: UserState }[] = [];
+        currentUsers.forEach((state, uid) => {
+            if (uid !== adminUserId && !state.group) {
+                pendingUsers.push({ userId: uid, state });
+            }
+        });
+
+        if (pendingUsers.length === 0) {
+            addLog('No pending members to add!', 'warning');
+            return;
+        }
+
+        // Helper: execute the actual add_members + join flow
+        const executeAddMembers = (
+            kps: any[],
+            usersToAdd: { userId: string; state: UserState }[]
+        ) => {
+            addLog(`Calling add_members() with ${kps.length} KeyPackages...`, 'commit');
+            const commitBundle = admin.group.add_members(
+                admin.provider,
+                admin.identity,
+                kps
+            );
+            addLog(`✓ Single commit! has_welcome: ${commitBundle.has_welcome()}, ${commitBundle.commit.length} bytes`, 'commit');
+
+            // Broadcast commit to existing group members BEFORE merge
+            const commitBytes = commitBundle.commit;
+            currentUsers.forEach((u, uid) => {
+                if (uid !== adminUserId && u.group) {
+                    try {
+                        u.group.process_message(u.provider, commitBytes);
+                        addLog(`${uid} processed commit (epoch: ${u.group.epoch()})`, 'info');
+                        updateUser(uid, prev => ({ ...prev, group: prev.group }));
+                    } catch (e) {
+                        addLog(`${uid} error processing commit: ${(e as Error).message}`, 'error');
+                    }
+                }
+            });
+
+            // Merge pending commit for admin
+            admin.group.merge_pending_commit(admin.provider);
+            addLog(`✓ Commit merged! New epoch: ${admin.group.epoch()}`, 'success');
+
+            // Export ratchet tree + welcome for new members
+            const ratchetTree = admin.group.export_ratchet_tree();
+            const welcome = commitBundle.welcome;
+
+            // All new members join with the SAME welcome + ratchet tree
+            const joinedUsers: string[] = [];
+            for (const { userId, state } of usersToAdd) {
+                try {
+                    const memberGroup = Group.join_with_welcome(state.provider, welcome, ratchetTree);
+                    addLog(`✓ ${userId} joined! epoch: ${memberGroup.epoch()}, cid: ${memberGroup.cid()}`, 'success');
+                    updateUser(userId, prev => ({ ...prev, group: memberGroup }));
+                    joinedUsers.push(userId);
+                } catch (e) {
+                    addLog(`${userId} error joining: ${(e as Error).message}`, 'error');
+                }
+            }
+
+            updateUser(adminUserId, prev => ({ ...prev, group: prev.group }));
+            return joinedUsers;
+        };
+
+        try {
+            addLog(`=== Batch Add Members: ${pendingUsers.map(u => u.userId).join(', ')} ===`, 'info');
+
+            // Step 1: Create key packages for ALL pending users
+            const allKeyPackages: any[] = [];
+            const kpToUserMap: Map<number, string> = new Map(); // index → userId
+            for (let i = 0; i < pendingUsers.length; i++) {
+                const { userId, state } = pendingUsers[i];
+                const kp = state.identity.key_package(state.provider);
+                allKeyPackages.push(kp);
+                kpToUserMap.set(i, userId);
+                addLog(`Created key package for ${userId}`, 'info');
+            }
+
+            // Step 2: Try batch add (Happy Path)
+            try {
+                const joinedUsers = executeAddMembers(allKeyPackages, pendingUsers);
+                const members = admin.group.members();
+                addLog(`Group members (${members.length}): ${members.map((m: { user_id: string }) => m.user_id).join(', ')}`, 'info');
+                addLog(`✅ Batch add complete — ${joinedUsers.length} users added in 1 commit, 1 welcome`, 'success');
+
+            } catch (batchError) {
+                // ========================================
+                // FALLBACK: Try-Filter-ReBatch (Hướng A — strict per-user)
+                // ========================================
+                addLog(`⚠️ Batch add failed: ${(batchError as Error).message}`, 'warning');
+                addLog(`🔍 Isolating bad KeyPackages...`, 'info');
+
+                // Test each KP individually by serializing → deserializing (triggers validate())
+                const failedUserIds = new Set<string>();
+                for (let i = 0; i < allKeyPackages.length; i++) {
+                    const userId = kpToUserMap.get(i)!;
+                    try {
+                        // Roundtrip validation: serialize → from_bytes (which calls validate())
+                        const kpBytes = allKeyPackages[i].to_bytes();
+                        // KeyPackage.from_bytes throws if invalid
+                        const _validated = KeyPackage.from_bytes(kpBytes);
+                        addLog(`  ✓ ${userId} KP valid`, 'info');
+                    } catch (e) {
+                        addLog(`  ✗ ${userId} KP INVALID: ${(e as Error).message}`, 'error');
+                        failedUserIds.add(userId);
+                    }
+                }
+
+                if (failedUserIds.size === pendingUsers.length) {
+                    addLog(`❌ All KeyPackages invalid. Cannot add anyone.`, 'error');
+                    return;
+                }
+
+                // Filter: remove ALL KPs of failing users (Hướng A — strict)
+                const cleanKps: any[] = [];
+                const cleanUsers: { userId: string; state: UserState }[] = [];
+                for (let i = 0; i < allKeyPackages.length; i++) {
+                    const userId = kpToUserMap.get(i)!;
+                    if (!failedUserIds.has(userId)) {
+                        cleanKps.push(allKeyPackages[i]);
+                        cleanUsers.push(pendingUsers[i]);
+                    }
+                }
+
+                addLog(`♻ Re-batching with ${cleanUsers.length} valid users (excluded: ${Array.from(failedUserIds).join(', ')})`, 'warning');
+
+                // Re-batch with clean KPs
+                const joinedUsers = executeAddMembers(cleanKps, cleanUsers);
+                const members = admin.group.members();
+                addLog(`Group members (${members.length}): ${members.map((m: { user_id: string }) => m.user_id).join(', ')}`, 'info');
+                addLog(`⚠️ Partial add — ${joinedUsers.length}/${pendingUsers.length} users added. Failed: ${Array.from(failedUserIds).join(', ')}`, 'warning');
+            }
+
+        } catch (error) {
+            addLog(`Error in add members flow: ${(error as Error).message}`, 'error');
+        }
+    }, [adminUserId, updateUser, addLog]);
+
+    // Remove member by user_id (Direct Commit — proposals inline)
     const removeMember = useCallback((userIdToRemove: string) => {
         if (!adminUserId) return;
         const currentUsers = usersRef.current;
@@ -240,32 +387,16 @@ function App(): React.ReactElement {
         try {
             addLog(`=== Remove Member: ${userIdToRemove} ===`, 'info');
 
-            // Step 1: Create remove proposal
-            const proposal = admin.group.propose_remove_member_by_user_id(
+            // Step 1: Direct Commit — remove_user() creates commit with inline remove proposals
+            const commitBundle = admin.group.remove_user(
                 admin.provider,
                 admin.identity,
                 userIdToRemove
             );
-            addLog(`📝 Remove proposal created for ${userIdToRemove}`, 'proposal');
-
-            // Step 2: Broadcast proposal to other members BEFORE commit
-            currentUsers.forEach((u, uid) => {
-                if (uid !== adminUserId && uid !== userIdToRemove && u.group) {
-                    try {
-                        u.group.process_message(u.provider, proposal.bytes);
-                        addLog(`${uid} received remove proposal`, 'info');
-                    } catch (e) {
-                        addLog(`${uid} error processing proposal: ${(e as Error).message}`, 'error');
-                    }
-                }
-            });
-
-            // Step 3: Commit
-            const commitBundle = admin.group.commit_pending_proposals(admin.provider, admin.identity);
             admin.group.merge_pending_commit(admin.provider);
             addLog(`✓ Member removed! New epoch: ${admin.group.epoch()}`, 'success');
 
-            // Step 4: Broadcast commit to remaining members
+            // Step 2: Broadcast commit to remaining members
             currentUsers.forEach((u, uid) => {
                 if (uid !== adminUserId && uid !== userIdToRemove && u.group) {
                     try {
@@ -481,6 +612,16 @@ function App(): React.ReactElement {
                             <UserPlus size={18} /> Add {uid} to Group
                         </button>
                     ))}
+
+                    {/* Batch add all pending members */}
+                    {groupCreated && usersNotInGroup.length >= 2 && (
+                        <button
+                            className="btn btn-success"
+                            onClick={addMultipleMembersToGroup}
+                        >
+                            <UsersRound size={18} /> Add All Pending ({usersNotInGroup.length})
+                        </button>
+                    )}
 
                     {/* Remove members (non-admin, in group) */}
                     {groupCreated && userIds.filter(uid => uid !== adminUserId && users.get(uid)?.group).map(uid => (

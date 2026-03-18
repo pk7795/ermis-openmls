@@ -86,9 +86,20 @@ impl Group {
             .collect()
     }
 
-    /// Get a member by user_id
+    /// Get a member by user_id (returns first match)
     pub fn member_by_user_id(&self, user_id: &str) -> Option<MemberInfo> {
         self.members().into_iter().find(|m| m.user_id == user_id)
+    }
+
+    /// Get ALL members (leaf nodes) for a given user_id
+    ///
+    /// A user with N devices will have N entries in the group.
+    /// Use this to find all leaf indices for a multi-device user.
+    pub fn members_by_user_id(&self, user_id: &str) -> Vec<MemberInfo> {
+        self.members()
+            .into_iter()
+            .filter(|m| m.user_id == user_id)
+            .collect()
     }
 
     /// Get the local member's leaf index

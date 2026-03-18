@@ -169,3 +169,24 @@ impl KeyPackage {
         Ok(hash_ref.as_slice().to_vec())
     }
 }
+
+/// Validate raw key package bytes without constructing a KeyPackage object.
+///
+/// Performs full validation: TLS deserialization, signature verification,
+/// protocol version check, lifetime check, init_key ≠ encryption_key.
+///
+/// # Arguments
+/// * `bytes` - TLS-serialized KeyPackage bytes (from server API)
+///
+/// # Returns
+/// `true` if the KeyPackage is valid, `false` otherwise.
+///
+/// # Example
+/// ```javascript
+/// const isValid = validate_key_package_bytes(kpBytes);
+/// if (!isValid) console.warn("Invalid KeyPackage!");
+/// ```
+#[wasm_bindgen]
+pub fn validate_key_package_bytes(bytes: &[u8]) -> bool {
+    KeyPackage::from_bytes(bytes).is_ok()
+}
