@@ -720,9 +720,9 @@ impl MlsGroup {
         )
     }
 
-    /// Stores the state of this group. Only to be called from constructors to
-    /// store the initial state of the group.
-    pub(super) fn store<Storage: crate::storage::StorageProvider>(
+    /// Stores the state of this group to the provider's storage.
+    /// Call after processing application messages to persist ratchet state.
+    pub fn store<Storage: crate::storage::StorageProvider>(
         &self,
         storage: &Storage,
     ) -> Result<(), Storage::Error> {

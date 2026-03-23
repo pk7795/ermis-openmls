@@ -65,7 +65,7 @@ impl CommitBundle {
     pub(crate) fn new(
         commit: &MlsMessageOut,
         welcome: Option<&MlsMessageOut>,
-        group_info: Option<&GroupInfo>,
+        group_info: Option<GroupInfo>,
     ) -> Self {
         let mut commit_bytes = vec![];
         commit.tls_serialize(&mut commit_bytes).unwrap();
@@ -76,9 +76,14 @@ impl CommitBundle {
             bytes
         });
 
+        // IMPORTANT: GroupInfo must be wrapped as MlsMessageOut before serialization.
+        // join_external() deserializes via MlsMessageIn::tls_deserialize(), which expects
+        // an MlsMessageOut-wrapped GroupInfo (not raw GroupInfo bytes).
+        // Converting GroupInfo → MlsMessageOut via Into trait produces the correct wire format.
         let group_info_bytes = group_info.map(|gi| {
+            let mls_msg: MlsMessageOut = gi.into();
             let mut bytes = vec![];
-            gi.tls_serialize(&mut bytes).unwrap();
+            mls_msg.tls_serialize(&mut bytes).unwrap();
             bytes
         });
 
@@ -95,7 +100,7 @@ impl CommitBundle {
         welcome: MlsMessageOut,
         group_info: Option<GroupInfo>,
     ) -> Self {
-        Self::new(&commit, Some(&welcome), group_info.as_ref())
+        Self::new(&commit, Some(&welcome), group_info)
     }
 
     /// Create from tuple (commit, optional_welcome, group_info)
@@ -104,7 +109,7 @@ impl CommitBundle {
         welcome: Option<MlsMessageOut>,
         group_info: Option<GroupInfo>,
     ) -> Self {
-        Self::new(&commit, welcome.as_ref(), group_info.as_ref())
+        Self::new(&commit, welcome.as_ref(), group_info)
     }
 }
 
@@ -120,6 +125,13 @@ impl Group {
         provider: &Provider,
         sender: &Identity,
     ) -> Result<CommitBundle, JsError> {
+        // Auto-clear stale pending commit from a previous failed operation
+        if self.mls_group.pending_commit().is_some() {
+            self.mls_group
+                .clear_pending_commit(provider.0.storage())
+                .map_err(|e| JsError::new(&format!("Failed to clear pending commit: {e}")))?;
+        }
+
         let (commit_msg, welcome_msg, group_info) = self
             .mls_group
             .commit_to_pending_proposals(provider.as_ref(), &sender.keypair)?;
@@ -127,7 +139,7 @@ impl Group {
         Ok(CommitBundle::new(
             &commit_msg,
             welcome_msg.as_ref(),
-            group_info.as_ref(),
+            group_info,
         ))
     }
 
@@ -155,7 +167,32 @@ impl Group {
         sender: &Identity,
         new_members: Vec<KeyPackage>,
     ) -> Result<CommitBundle, JsError> {
-        let key_packages: Vec<_> = new_members.iter().map(|kp| kp.0.clone()).collect();
+        // Auto-clear stale pending commit from a previous failed operation
+        if self.mls_group.pending_commit().is_some() {
+            self.mls_group
+                .clear_pending_commit(provider.0.storage())
+                .map_err(|e| JsError::new(&format!("Failed to clear pending commit: {e}")))?;
+        }
+
+        // Collect existing members' signature keys to filter duplicates
+        let existing_sig_keys: std::collections::HashSet<Vec<u8>> = self
+            .mls_group
+            .members()
+            .map(|m| m.signature_key.clone())
+            .collect();
+
+        let key_packages: Vec<_> = new_members
+            .iter()
+            .filter(|kp| {
+                let sig_key = kp.0.leaf_node().signature_key().as_slice().to_vec();
+                !existing_sig_keys.contains(&sig_key)
+            })
+            .map(|kp| kp.0.clone())
+            .collect();
+
+        if key_packages.is_empty() {
+            return Err(JsError::new("All members already in group, nothing to add"));
+        }
 
         let (commit_msg, welcome_msg, group_info) =
             self.mls_group

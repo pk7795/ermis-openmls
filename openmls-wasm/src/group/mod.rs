@@ -20,6 +20,7 @@ pub use state::*;
 use openmls::{
     framing::{MlsMessageBodyIn, MlsMessageIn},
     group::{GroupId, MlsGroup, MlsGroupJoinConfig, StagedWelcome},
+    prelude::SenderRatchetConfiguration,
 };
 use tls_codec::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -79,8 +80,13 @@ impl Group {
             .ciphersuite(CIPHERSUITE)
             .with_group_id(GroupId::from_slice(&group_id_bytes))
             .use_ratchet_tree_extension(true)
-            // .max_past_epochs(5)
-            // .sender_ratchet_configuration(SenderRatchetConfiguration::new(5, 1000))
+            // Keep decryption keys for 5 past epochs, allowing late-arriving
+            // messages sent before a key rotation to still be decrypted.
+            .max_past_epochs(5)
+            // out_of_order_tolerance=10: keep 10 past decryption keys within an epoch
+            //   (handles messages arriving out of order)
+            // maximum_forward_distance=2000: allow skipping up to 2000 dropped messages
+            .sender_ratchet_configuration(SenderRatchetConfiguration::new(10, 2000))
             .build(
                 &provider.0,
                 &founder.keypair,
@@ -110,6 +116,18 @@ impl Group {
         Ok(Group { mls_group })
     }
 
+    /// Persist the group's current state to the Provider's storage.
+    ///
+    /// MUST be called after processing application messages (decrypt) to save
+    /// the updated ratchet/secret tree state. Without this, a Provider restore
+    /// (e.g., on page reload) will load stale ratchet state, causing
+    /// SecretReuseError for messages that were already decrypted.
+    pub fn save_state(&self, provider: &Provider) -> Result<(), JsError> {
+        self.mls_group
+            .store(provider.0.storage())
+            .map_err(|e| JsError::new(&format!("Failed to save group state: {e}")))
+    }
+
     /// Create a new group (legacy API, uses group_id string directly)
     pub fn create_new(provider: &Provider, founder: &Identity, group_id: &str) -> Group {
         Self::create_with_cid(provider, founder, group_id).unwrap()
@@ -135,7 +153,12 @@ impl Group {
             ))),
         }?;
 
-        let config = MlsGroupJoinConfig::builder().build();
+        // Must match the config used in create_with_cid for consistency.
+        // See create_with_cid for detailed explanation of these values.
+        let config = MlsGroupJoinConfig::builder()
+            .max_past_epochs(5)
+            .sender_ratchet_configuration(SenderRatchetConfiguration::new(10, 2000))
+            .build();
         let ratchet_tree_in = ratchet_tree.map(|rt| rt.0);
 
         let mls_group =
@@ -174,10 +197,19 @@ impl Group {
         group_info: &[u8],
         ratchet_tree: Option<RatchetTree>,
     ) -> Result<ExternalJoinResult, JsError> {
+        // group_info bytes are TLS-serialized MlsMessageOut (from export_group_info)
+        // → deserialize as MlsMessageIn first, then extract the GroupInfo body
         let mut gi_slice = group_info;
-        let verified_group_info =
-            openmls::messages::group_info::VerifiableGroupInfo::tls_deserialize(&mut gi_slice)
-                .map_err(|e| JsError::new(&format!("GroupInfo deserialization error: {e}")))?;
+        let mls_message = MlsMessageIn::tls_deserialize(&mut gi_slice)
+            .map_err(|e| JsError::new(&format!("GroupInfo MlsMessage deserialization error: {e}")))?;
+
+        let verified_group_info = match mls_message.extract() {
+            MlsMessageBodyIn::GroupInfo(gi) => Ok(gi),
+            other => Err(JsError::new(&format!(
+                "Expected GroupInfo message, got {:?}",
+                std::mem::discriminant(&other)
+            ))),
+        }?;
 
         let ratchet_tree_in = ratchet_tree.map(|rt| rt.0);
 
@@ -186,7 +218,11 @@ impl Group {
             &identity.keypair,
             ratchet_tree_in,
             verified_group_info,
-            &MlsGroupJoinConfig::builder().build(),
+            // Must match the config used in create_with_cid for consistency.
+            &MlsGroupJoinConfig::builder()
+                .max_past_epochs(5)
+                .sender_ratchet_configuration(SenderRatchetConfiguration::new(10, 2000))
+                .build(),
             None, // No capabilities
             None, // No extra extensions
             &[],  // Empty AAD

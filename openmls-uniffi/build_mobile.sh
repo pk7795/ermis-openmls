@@ -135,6 +135,36 @@ build_android() {
     log "✓ Android libraries created at $OUT_DIR/android/jniLibs/"
 }
 
+# Patch auto-generated Kotlin bindings to add missing `public` visibility modifiers.
+# UniFFI sometimes generates classes/interfaces/funs without explicit visibility,
+# which causes compilation errors in Android projects using strict visibility rules.
+patch_kotlin_bindings() {
+    local kotlin_dir="$OUT_DIR/kotlin"
+    local fix_script="$SCRIPT_DIR/fix_unit_funs.pl"
+    log "Patching Kotlin bindings for Android compatibility..."
+
+    find "$kotlin_dir" -name "*.kt" | while read -r kt_file; do
+        # Pass 1: Add missing `public` visibility modifiers.
+        # UniFFI sometimes generates classes/funs without explicit visibility.
+        perl -i -pe '
+            next if /^\s*(public|private|internal|protected)\b/;
+            next if /^\s*[@\/\*#]/;
+            s/^(\s*)((?:(?:inline|suspend|override|abstract|open|final|sealed|data|inner|companion|external|\@[\w]+(?:\([^)]*\))?\s+)*)(?:class|interface|object|enum class|fun|typealias)\b)/$1public $2/;
+        ' "$kt_file"
+
+        # Pass 2: Convert Unit function expression bodies ("= \n") to block bodies ("{}").
+        # UniFFI generates `fun foo(...) \n    = \ncallWithPointer {...}` for void functions,
+        # which causes Android type coercion errors.
+        if [ -f "$fix_script" ]; then
+            perl "$fix_script" "$kt_file"
+        fi
+
+        log "  ✓ Patched: $(basename "$kt_file")"
+    done
+
+    log "✓ Kotlin bindings patched"
+}
+
 generate_bindings() {
     log "========================================="
     log "Generating bindings..."
@@ -157,6 +187,9 @@ generate_bindings() {
         --library "$PROJECT_ROOT/target/release/libopenmls_uniffi.dylib" \
         --language kotlin \
         --out-dir "$OUT_DIR/kotlin"
+
+    # Post-process: fix missing public modifiers in generated Kotlin
+    patch_kotlin_bindings
 
     log "✓ Swift bindings at $OUT_DIR/swift/"
     log "✓ Kotlin bindings at $OUT_DIR/kotlin/"

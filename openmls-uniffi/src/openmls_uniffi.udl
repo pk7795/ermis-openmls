@@ -133,6 +133,9 @@ interface Group {
 
     // State
     [Throws=MlsError]
+    void save_state(Provider provider);
+
+    [Throws=MlsError]
     string cid();
     bytes group_id();
     u64 epoch();

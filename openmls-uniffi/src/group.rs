@@ -9,7 +9,7 @@ use openmls::{
     credentials::BasicCredential,
     framing::{MlsMessageBodyIn, MlsMessageIn, MlsMessageOut},
     group::{GroupId, MlsGroup, MlsGroupJoinConfig, StagedWelcome},
-    prelude::LeafNodeIndex,
+    prelude::{LeafNodeIndex, SenderRatchetConfiguration},
 };
 use openmls_traits::OpenMlsProvider;
 use tls_codec::{Deserialize, Serialize};
@@ -45,12 +45,21 @@ impl Group {
             .ciphersuite(CIPHERSUITE)
             .with_group_id(GroupId::from_slice(&group_id_bytes))
             .use_ratchet_tree_extension(true)
+            // Keep decryption keys for 5 past epochs, allowing late-arriving
+            // messages sent before a key rotation to still be decrypted.
+            .max_past_epochs(5)
+            // out_of_order_tolerance=10: keep 10 past decryption keys within an epoch
+            // maximum_forward_distance=2000: allow skipping up to 2000 dropped messages
+            .sender_ratchet_configuration(SenderRatchetConfiguration::new(10, 2000))
             .build(
                 &*guard,
                 &founder.keypair,
                 founder.credential_with_key.clone(),
             )
-            .map_err(|_| MlsError::InternalError)?;
+            .map_err(|e| {
+                eprintln!("[MLS] create_with_cid failed: {:?}", e);
+                MlsError::InternalError
+            })?;
 
         Ok(Group {
             mls_group: Mutex::new(mls_group),
@@ -75,6 +84,19 @@ impl Group {
         })
     }
 
+    /// Persist the group's current state to the Provider's storage.
+    ///
+    /// MUST be called after processing application messages (decrypt) to save
+    /// the updated ratchet/secret tree state. Without this, a Provider restore
+    /// would load stale ratchet state, causing SecretReuseError.
+    pub fn save_state(&self, provider: Arc<Provider>) -> Result<(), MlsError> {
+        let group = self.mls_group.lock().unwrap();
+        let prov_guard = provider.lock();
+        group
+            .store(prov_guard.storage())
+            .map_err(|_| MlsError::StorageError)
+    }
+
     /// Join a group using a Welcome message
     pub fn join_with_welcome(
         provider: Arc<Provider>,
@@ -90,15 +112,25 @@ impl Group {
             _ => Err(MlsError::InvalidMessage),
         }?;
 
-        let config = MlsGroupJoinConfig::builder().build();
+        // Must match the config used in create_with_cid for consistency.
+        let config = MlsGroupJoinConfig::builder()
+            .max_past_epochs(5)
+            .sender_ratchet_configuration(SenderRatchetConfiguration::new(10, 2000))
+            .build();
         let ratchet_tree_in = ratchet_tree.map(|rt| rt.inner.clone());
 
         let guard = provider.lock();
         let mls_group =
             StagedWelcome::new_from_welcome(&*guard, &config, mls_welcome, ratchet_tree_in)
-                .map_err(|_| MlsError::InternalError)?
+                .map_err(|e| {
+                    eprintln!("[MLS] join_with_welcome: new_from_welcome failed: {:?}", e);
+                    MlsError::InternalError
+                })?
                 .into_group(&*guard)
-                .map_err(|_| MlsError::InternalError)?;
+                .map_err(|e| {
+                    eprintln!("[MLS] join_with_welcome: into_group failed: {:?}", e);
+                    MlsError::InternalError
+                })?;
 
         Ok(Group {
             mls_group: Mutex::new(mls_group),
@@ -311,6 +343,14 @@ impl Group {
 
         match processed_msg.into_content() {
             openmls::framing::ProcessedMessageContent::ApplicationMessage(app_msg) => {
+                // CRITICAL: Persist ratchet state after decrypting app messages.
+                // process_message advances the decryption ratchet in-memory but
+                // does NOT write it to Provider storage. Without this, a Provider
+                // restore loads stale ratchet state → SecretReuseError.
+                let prov_guard2 = provider.lock();
+                let _ = group.store(prov_guard2.storage());
+                drop(prov_guard2);
+
                 Ok(ProcessedMessage {
                     message_type: MessageType::ApplicationMessage,
                     content: Some(app_msg.into_bytes()),
@@ -585,11 +625,25 @@ impl Group {
         let mut group = self.mls_group.lock().unwrap();
         let prov_guard = provider.lock();
 
+        // Auto-clear stale pending commit from a previous failed operation
+        if group.pending_commit().is_some() {
+            eprintln!("[MLS] commit_pending_proposals: clearing stale pending commit");
+            group
+                .clear_pending_commit(prov_guard.storage())
+                .map_err(|e| {
+                    eprintln!("[MLS] clear_pending_commit FAILED: {:?}", e);
+                    MlsError::InternalError
+                })?;
+        }
+
         let (commit_msg, welcome_msg, group_info) = group
             .commit_to_pending_proposals(&*prov_guard, &sender.keypair)
-            .map_err(|_| MlsError::InternalError)?;
+            .map_err(|e| {
+                eprintln!("[MLS] commit_pending_proposals FAILED: {:?}", e);
+                MlsError::InternalError
+            })?;
 
-        serialize_commit_bundle(&commit_msg, welcome_msg.as_ref(), group_info.as_ref())
+        serialize_commit_bundle(&commit_msg, welcome_msg.as_ref(), group_info)
     }
 
     /// Merge the pending commit after DS confirmation
@@ -598,7 +652,10 @@ impl Group {
         let mut prov_guard = provider.lock();
         group
             .merge_pending_commit(&mut *prov_guard)
-            .map_err(|_| MlsError::InternalError)
+            .map_err(|e| {
+                eprintln!("[MLS] merge_pending_commit FAILED: {:?}", e);
+                MlsError::InternalError
+            })
     }
 
     /// Discard the pending commit (rollback)
@@ -620,35 +677,60 @@ impl Group {
         let mut group = self.mls_group.lock().unwrap();
         let prov_guard = provider.lock();
 
-        let key_packages: Vec<_> = new_members.iter().map(|kp| kp.inner.clone()).collect();
+        // Auto-clear stale pending commit from a previous failed operation
+        if group.pending_commit().is_some() {
+            eprintln!("[MLS] add_members: clearing stale pending commit");
+            group
+                .clear_pending_commit(prov_guard.storage())
+                .map_err(|e| {
+                    eprintln!("[MLS] clear_pending_commit FAILED: {:?}", e);
+                    MlsError::InternalError
+                })?;
+        }
 
+        // Collect existing members' signature keys to filter duplicates
+        let existing_sig_keys: std::collections::HashSet<Vec<u8>> = group
+            .members()
+            .map(|m| m.signature_key.clone())
+            .collect();
+
+        let key_packages: Vec<_> = new_members
+            .iter()
+            .filter(|kp| {
+                let sig_key = kp.inner.leaf_node().signature_key().as_slice().to_vec();
+                let is_dup = existing_sig_keys.contains(&sig_key);
+                if is_dup {
+                    eprintln!("[MLS] add_members: skipping duplicate signature key");
+                }
+                !is_dup
+            })
+            .map(|kp| kp.inner.clone())
+            .collect();
+
+        if key_packages.is_empty() {
+            eprintln!("[MLS] add_members: all members already in group, nothing to add");
+            return Err(MlsError::InvalidState);
+        }
+
+        eprintln!("[MLS] add_members: key_packages count={}, group epoch={}", key_packages.len(), group.epoch().as_u64());
         let (commit_msg, welcome_msg, group_info) = group
             .add_members(&*prov_guard, &sender.keypair, &key_packages)
-            .map_err(|_| MlsError::InternalError)?;
+            .map_err(|e| {
+                eprintln!("[MLS] add_members FAILED: {:?}", e);
+                MlsError::InternalError
+            })?;
 
-        let mut commit_bytes = vec![];
-        commit_msg
-            .tls_serialize(&mut commit_bytes)
-            .map_err(|_| MlsError::SerializationError)?;
-
+        // Use the shared helper — which wraps GroupInfo as MlsMessageOut before serializing.
         let mut welcome_bytes = vec![];
         welcome_msg
             .tls_serialize(&mut welcome_bytes)
             .map_err(|_| MlsError::SerializationError)?;
 
-        let group_info_bytes = group_info
-            .map(|gi| {
-                let mut bytes = vec![];
-                gi.tls_serialize(&mut bytes)
-                    .map_err(|_| MlsError::SerializationError)?;
-                Ok::<_, MlsError>(bytes)
-            })
-            .transpose()?;
-
+        let commit_bundle = serialize_commit_bundle(&commit_msg, None::<&MlsMessageOut>, group_info)?;
         Ok(CommitBundle {
-            commit: commit_bytes,
+            commit: commit_bundle.commit,
             welcome: Some(welcome_bytes),
-            group_info: group_info_bytes,
+            group_info: commit_bundle.group_info,
         })
     }
 
@@ -687,7 +769,7 @@ impl Group {
             .remove_members(&*prov_guard, &sender.keypair, &leaf_indices)
             .map_err(|_| MlsError::InternalError)?;
 
-        serialize_commit_bundle(&commit_msg, welcome_msg.as_ref(), group_info.as_ref())
+        serialize_commit_bundle(&commit_msg, welcome_msg.as_ref(), group_info)
     }
 
     /// Remove ALL devices of a user by user_id and commit immediately
@@ -734,7 +816,7 @@ impl Group {
         let welcome_msg = welcome
             .map(|w| MlsMessageOut::from_welcome(w, openmls::prelude::ProtocolVersion::Mls10));
 
-        serialize_commit_bundle(&commit_msg, welcome_msg.as_ref(), group_info.as_ref())
+        serialize_commit_bundle(&commit_msg, welcome_msg.as_ref(), group_info)
     }
 }
 
@@ -750,10 +832,16 @@ pub fn join_external(
     group_info: Vec<u8>,
     ratchet_tree: Option<Arc<RatchetTree>>,
 ) -> Result<ExternalJoinResult, MlsError> {
+    // group_info bytes are TLS-serialized MlsMessageOut (from export_group_info)
+    // → deserialize as MlsMessageIn first, then extract the GroupInfo body
     let mut gi_slice = group_info.as_slice();
-    let verified_group_info =
-        openmls::messages::group_info::VerifiableGroupInfo::tls_deserialize(&mut gi_slice)
-            .map_err(|_| MlsError::DeserializationError)?;
+    let mls_message = MlsMessageIn::tls_deserialize(&mut gi_slice)
+        .map_err(|_| MlsError::DeserializationError)?;
+
+    let verified_group_info = match mls_message.extract() {
+        MlsMessageBodyIn::GroupInfo(gi) => Ok(gi),
+        _ => Err(MlsError::InvalidMessage),
+    }?;
 
     let ratchet_tree_in = ratchet_tree.map(|rt| rt.inner.clone());
 
@@ -763,7 +851,11 @@ pub fn join_external(
         &identity.keypair,
         ratchet_tree_in,
         verified_group_info,
-        &MlsGroupJoinConfig::builder().build(),
+        // Must match the config used in create_with_cid for consistency.
+        &MlsGroupJoinConfig::builder()
+            .max_past_epochs(5)
+            .sender_ratchet_configuration(SenderRatchetConfiguration::new(10, 2000))
+            .build(),
         None,
         None,
         &[],
@@ -788,15 +880,18 @@ pub fn join_external(
 // Helpers
 // ============================================================================
 
-fn serialize_commit_bundle<W, G>(
+/// Serialize a commit bundle into bytes.
+///
+/// IMPORTANT: GroupInfo MUST be wrapped as MlsMessageOut before serialization.
+/// `join_external()` (and `join_with_welcome()`) deserialize via
+/// `MlsMessageIn::tls_deserialize()`, which expects the MlsMessageOut wire format.
+/// Serializing a raw `GroupInfo` struct directly produces bytes with a different
+/// TLS header → `UnknownValue` deserialization error on the client.
+fn serialize_commit_bundle(
     commit: &MlsMessageOut,
-    welcome: Option<&W>,
-    group_info: Option<&G>,
-) -> Result<CommitBundle, MlsError>
-where
-    W: Serialize,
-    G: Serialize,
-{
+    welcome: Option<&MlsMessageOut>,
+    group_info: Option<openmls::messages::group_info::GroupInfo>,
+) -> Result<CommitBundle, MlsError> {
     let mut commit_bytes = vec![];
     commit
         .tls_serialize(&mut commit_bytes)
@@ -811,10 +906,15 @@ where
         })
         .transpose()?;
 
+    // Convert GroupInfo → MlsMessageOut via Into trait, then serialize.
+    // This produces the correct wire format expected by MlsMessageIn::tls_deserialize()
+    // in join_external() and the server-side GroupInfo parsing.
     let group_info_bytes = group_info
         .map(|gi| {
+            let mls_msg: MlsMessageOut = gi.into();
             let mut bytes = vec![];
-            gi.tls_serialize(&mut bytes)
+            mls_msg
+                .tls_serialize(&mut bytes)
                 .map_err(|_| MlsError::SerializationError)?;
             Ok::<_, MlsError>(bytes)
         })
