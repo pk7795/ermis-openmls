@@ -8,7 +8,11 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
     onSendMessage,
     messages = [],
     members = [],
-    epoch
+    epoch,
+    onAddMember,
+    onRemoveMember,
+    onExternalJoinPre,
+    onExternalJoinPost
 }) => {
     const [input, setInput] = useState<string>('');
     const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -31,10 +35,50 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
     return (
         <div className="panel" style={{ height: '550px', display: 'flex', flexDirection: 'column' }}>
             <div style={{ borderBottom: '1px solid #e2e8f0', paddingBottom: '12px', marginBottom: '12px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                    <div style={{ width: 10, height: 10, borderRadius: '50%', background: '#10b981' }} />
-                    <h3>{name}</h3>
-                    <span className="badge badge-info">Epoch: {epoch}</span>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <div style={{ width: 10, height: 10, borderRadius: '50%', background: '#10b981' }} />
+                        <h3>{name}</h3>
+                        <span className="badge badge-info">Epoch: {epoch}</span>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                        {onAddMember && (
+                            <button
+                                className="btn btn-primary"
+                                style={{ padding: '4px 8px', fontSize: '12px' }}
+                                onClick={() => onAddMember(userId)}
+                            >
+                                Add to Group
+                            </button>
+                        )}
+                        {onRemoveMember && (
+                            <button
+                                className="btn btn-warning"
+                                style={{ padding: '4px 8px', fontSize: '12px' }}
+                                onClick={() => onRemoveMember(userId)}
+                            >
+                                Remove
+                            </button>
+                        )}
+                        {onExternalJoinPre && (
+                            <button
+                                className="btn btn-success"
+                                style={{ padding: '4px 8px', fontSize: '12px' }}
+                                onClick={() => onExternalJoinPre(userId)}
+                            >
+                                External Join (Pre)
+                            </button>
+                        )}
+                        {onExternalJoinPost && (
+                            <button
+                                className="btn btn-success"
+                                style={{ padding: '4px 8px', fontSize: '12px' }}
+                                onClick={() => onExternalJoinPost(userId)}
+                            >
+                                External Join (Post)
+                            </button>
+                        )}
+                    </div>
                 </div>
                 <div style={{ fontSize: '12px', color: '#666' }}>
                     Members: {members.map((m: MlsMember) => m.user_id).join(', ')}

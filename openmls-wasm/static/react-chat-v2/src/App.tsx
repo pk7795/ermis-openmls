@@ -52,6 +52,11 @@ function App(): React.ReactElement {
     const [groupCreated, setGroupCreated] = useState<boolean>(false);
     const [adminUserId, setAdminUserId] = useState<string | null>(null);
     const [pendingProposals, setPendingProposals] = useState<number>(0);
+    const [exportedGroupInfoPreMerge, setExportedGroupInfoPreMerge] = useState<Uint8Array | null>(null);
+    const [exportedRatchetTreePreMerge, setExportedRatchetTreePreMerge] = useState<any | null>(null);
+
+    const [exportedGroupInfoPostMerge, setExportedGroupInfoPostMerge] = useState<Uint8Array | null>(null);
+    const [exportedRatchetTreePostMerge, setExportedRatchetTreePostMerge] = useState<any | null>(null);
 
     const addLog = useCallback((message: string, type: LogType = 'info') => {
         const time = new Date().toLocaleTimeString();
@@ -98,6 +103,25 @@ function App(): React.ReactElement {
             return newMap;
         });
     }, []);
+
+    // Helper: Capture Pre/Post Merge Group Infos
+    const capturePreMerge = useCallback((group: any, commitBundle: any) => {
+        const gi = commitBundle.group_info;
+        if (gi) {
+            setExportedGroupInfoPreMerge(gi);
+            setExportedRatchetTreePreMerge(group.export_ratchet_tree());
+            addLog(`Captured Pre-Merge GroupInfo (${gi.length} bytes)`, 'info');
+        }
+    }, [addLog]);
+
+    const capturePostMerge = useCallback((group: any, provider: any, identity: any) => {
+        const gi = group.export_group_info(provider, identity, true);
+        if (gi) {
+            setExportedGroupInfoPostMerge(gi);
+            setExportedRatchetTreePostMerge(group.export_ratchet_tree());
+            addLog(`Captured Post-Merge GroupInfo (${gi.length} bytes)`, 'info');
+        }
+    }, [addLog]);
 
     // Add a new user (create identity)
     const addNewUser = useCallback((name: string) => {
@@ -193,6 +217,7 @@ function App(): React.ReactElement {
             addLog('Committing proposal...', 'commit');
             const commitBundle = admin.group.commit_pending_proposals(admin.provider, admin.identity);
             addLog(`✓ Commit created! has_welcome: ${commitBundle.has_welcome()}`, 'commit');
+            capturePreMerge(admin.group, commitBundle);
 
             // Step 4: Broadcast commit to existing group members BEFORE merge
             const commitBytes = commitBundle.commit;
@@ -211,6 +236,7 @@ function App(): React.ReactElement {
             // Step 5: Merge pending commit for admin
             admin.group.merge_pending_commit(admin.provider);
             addLog(`✓ Commit merged! New epoch: ${admin.group.epoch()}`, 'success');
+            capturePostMerge(admin.group, admin.provider, admin.identity);
 
             // Step 6: New member joins with Welcome
             const ratchetTree = admin.group.export_ratchet_tree();
@@ -229,7 +255,7 @@ function App(): React.ReactElement {
         } catch (error) {
             addLog(`Error adding member ${userId}: ${(error as Error).message}`, 'error');
         }
-    }, [adminUserId, updateUser, addLog]);
+    }, [adminUserId, updateUser, addLog, capturePreMerge, capturePostMerge]);
 
     // Batch add ALL pending members with Try-Filter-ReBatch fallback
     const addMultipleMembersToGroup = useCallback(() => {
@@ -263,6 +289,7 @@ function App(): React.ReactElement {
                 kps
             );
             addLog(`✓ Single commit! has_welcome: ${commitBundle.has_welcome()}, ${commitBundle.commit.length} bytes`, 'commit');
+            capturePreMerge(admin.group, commitBundle);
 
             // Broadcast commit to existing group members BEFORE merge
             const commitBytes = commitBundle.commit;
@@ -281,6 +308,7 @@ function App(): React.ReactElement {
             // Merge pending commit for admin
             admin.group.merge_pending_commit(admin.provider);
             addLog(`✓ Commit merged! New epoch: ${admin.group.epoch()}`, 'success');
+            capturePostMerge(admin.group, admin.provider, admin.identity);
 
             // Export ratchet tree + welcome for new members
             const ratchetTree = admin.group.export_ratchet_tree();
@@ -375,7 +403,7 @@ function App(): React.ReactElement {
         } catch (error) {
             addLog(`Error in add members flow: ${(error as Error).message}`, 'error');
         }
-    }, [adminUserId, updateUser, addLog]);
+    }, [adminUserId, updateUser, addLog, capturePreMerge, capturePostMerge]);
 
     // Remove member by user_id (Direct Commit — proposals inline)
     const removeMember = useCallback((userIdToRemove: string) => {
@@ -393,8 +421,11 @@ function App(): React.ReactElement {
                 admin.identity,
                 userIdToRemove
             );
+            capturePreMerge(admin.group, commitBundle);
+
             admin.group.merge_pending_commit(admin.provider);
             addLog(`✓ Member removed! New epoch: ${admin.group.epoch()}`, 'success');
+            capturePostMerge(admin.group, admin.provider, admin.identity);
 
             // Step 2: Broadcast commit to remaining members
             currentUsers.forEach((u, uid) => {
@@ -419,7 +450,7 @@ function App(): React.ReactElement {
         } catch (error) {
             addLog(`Error removing member: ${(error as Error).message}`, 'error');
         }
-    }, [adminUserId, updateUser, addLog]);
+    }, [adminUserId, updateUser, addLog, capturePreMerge, capturePostMerge]);
 
     // Self update (key rotation)
     const performKeyRotation = useCallback((userKey: string) => {
@@ -432,9 +463,11 @@ function App(): React.ReactElement {
 
             const commitBundle = user.group.self_update(user.provider, user.identity);
             addLog(`✓ Self-update commit created`, 'commit');
+            capturePreMerge(user.group, commitBundle);
 
             user.group.merge_pending_commit(user.provider);
             addLog(`✓ Keys rotated! New epoch: ${user.group.epoch()}`, 'success');
+            capturePostMerge(user.group, user.provider, user.identity);
 
             updateUser(userKey, prev => ({ ...prev, group: prev.group }));
 
@@ -456,7 +489,87 @@ function App(): React.ReactElement {
         } catch (error) {
             addLog(`Error in key rotation: ${(error as Error).message}`, 'error');
         }
-    }, [updateUser, addLog]);
+    }, [updateUser, addLog, capturePreMerge, capturePostMerge]);
+
+    // External Join
+    const performExternalJoin = useCallback((userIdToJoin: string, type: 'pre' | 'post') => {
+        const groupInfo = type === 'pre' ? exportedGroupInfoPreMerge : exportedGroupInfoPostMerge;
+        const ratchetTree = type === 'pre' ? exportedRatchetTreePreMerge : exportedRatchetTreePostMerge;
+
+        if (!groupInfo || !ratchetTree) {
+            addLog(`No exported GroupInfo available for ${type}-merge!`, 'warning');
+            return;
+        }
+
+        const currentUsers = usersRef.current;
+        const member = currentUsers.get(userIdToJoin);
+        if (!member) return;
+
+        try {
+            addLog(`=== External Join (${type}-merge): ${userIdToJoin} ===`, 'info');
+            
+            // Step 1: Join externally using the exported group info and ratchet tree
+            const joinResult = Group.join_external(
+                member.provider, 
+                member.identity, 
+                groupInfo, 
+                ratchetTree
+            );
+            
+            const newGroup = joinResult.group;
+            if (!newGroup) {
+                addLog(`External join failed: no group returned`, 'error');
+                return;
+            }
+            
+            const commitMsg = joinResult.commit;
+            addLog(`✓ ${userIdToJoin} joined externally! epoch: ${newGroup.epoch()}, cid: ${newGroup.cid()}`, 'success');
+            
+            updateUser(userIdToJoin, prev => ({ ...prev, group: newGroup }));
+
+            // Step 2: Broadcast the external join commit to ALL EXISTING members
+            currentUsers.forEach((u, uid) => {
+                // Must ensure we only broadcast to members already in the group (excluding the new joiner)
+                if (uid !== userIdToJoin && u.group) {
+                    try {
+                        u.group.process_message(u.provider, commitMsg);
+                        addLog(`${uid} processed external join commit (new epoch: ${u.group.epoch()})`, 'info');
+                        updateUser(uid, prev => ({ ...prev, group: prev.group }));
+                    } catch (e) {
+                        addLog(`${uid} error processing external commit: ${(e as Error).message}`, 'error');
+                    }
+                }
+            });
+
+            // Re-fetch admin group members for log
+            if (adminUserId) {
+                const admin = usersRef.current.get(adminUserId);
+                if (admin?.group) {
+                    const members = admin.group.members();
+                    addLog(`Group members: ${members.map((m: { user_id: string }) => m.user_id).join(', ')}`, 'info');
+                }
+            }
+
+            // Clear exported group info after successful use (optional, but good for testing)
+            if (type === 'pre') {
+                setExportedGroupInfoPreMerge(null);
+                setExportedRatchetTreePreMerge(null);
+            } else {
+                setExportedGroupInfoPostMerge(null);
+                setExportedRatchetTreePostMerge(null);
+            }
+
+            // Capture the new post-merge group state after successful external join
+            capturePostMerge(newGroup, member.provider, member.identity);
+
+        } catch (error) {
+            addLog(`Error performing external join: ${(error as Error).message}`, 'error');
+        }
+    }, [
+        exportedGroupInfoPreMerge, exportedRatchetTreePreMerge,
+        exportedGroupInfoPostMerge, exportedRatchetTreePostMerge,
+        adminUserId, updateUser, addLog, capturePostMerge
+    ]);
 
     // Send encrypted message with METADATA SEPARATION
     const handleSendMessage = useCallback((senderId: string, text: string, options: SendMessageOptions = {}) => {
@@ -485,7 +598,8 @@ function App(): React.ReactElement {
                 serializedContent,
                 serializeAAD(aad)
             );
-
+            const testProcess = sender.group.process_message(sender.provider, ciphertext);
+            console.log('testProcess', testProcess);
             // Log AAD and separation
             addLog(`${senderId} [AAD] message_id=${messageId.slice(0, 8)}... sender=${senderId} channel=${CHANNEL_CID.slice(0, 15)}...`, 'info');
             addLog(`${senderId} [E2EE] Encrypted with AAD (${ciphertext.length} bytes)`, 'info');
@@ -602,17 +716,6 @@ function App(): React.ReactElement {
                         <Shield size={18} /> Create Group (CID)
                     </button>
 
-                    {/* Add pending members to group */}
-                    {groupCreated && usersNotInGroup.map(uid => (
-                        <button
-                            key={uid}
-                            className="btn btn-primary"
-                            onClick={() => addMemberToGroup(uid)}
-                        >
-                            <UserPlus size={18} /> Add {uid} to Group
-                        </button>
-                    ))}
-
                     {/* Batch add all pending members */}
                     {groupCreated && usersNotInGroup.length >= 2 && (
                         <button
@@ -622,17 +725,6 @@ function App(): React.ReactElement {
                             <UsersRound size={18} /> Add All Pending ({usersNotInGroup.length})
                         </button>
                     )}
-
-                    {/* Remove members (non-admin, in group) */}
-                    {groupCreated && userIds.filter(uid => uid !== adminUserId && users.get(uid)?.group).map(uid => (
-                        <button
-                            key={`remove-${uid}`}
-                            className="btn btn-warning"
-                            onClick={() => removeMember(uid)}
-                        >
-                            <UserMinus size={18} /> Remove {uid}
-                        </button>
-                    ))}
 
                     {adminUserId && users.get(adminUserId)?.group && (
                         <button
@@ -702,6 +794,10 @@ function App(): React.ReactElement {
                             members={user?.group?.members() || []}
                             epoch={user?.group?.epoch() || 0}
                             onSendMessage={handleSendMessage}
+                            onAddMember={(groupCreated && adminUserId && !user?.group && uid !== adminUserId && users.get(adminUserId)?.group) ? addMemberToGroup : undefined}
+                            onRemoveMember={(groupCreated && adminUserId && user?.group && uid !== adminUserId && users.get(adminUserId)?.group) ? removeMember : undefined}
+                            onExternalJoinPre={(exportedGroupInfoPreMerge && !user?.group && uid !== adminUserId) ? () => performExternalJoin(uid, 'pre') : undefined}
+                            onExternalJoinPost={(exportedGroupInfoPostMerge && !user?.group && uid !== adminUserId) ? () => performExternalJoin(uid, 'post') : undefined}
                         />
                     );
                 })}

@@ -81,6 +81,10 @@ export interface ChatPanelProps {
     members: MlsMember[];
     epoch: number;
     onSendMessage: (senderId: string, text: string, options?: SendMessageOptions) => void;
+    onAddMember?: (userId: string) => void;
+    onRemoveMember?: (userId: string) => void;
+    onExternalJoinPre?: (userId: string) => void;
+    onExternalJoinPost?: (userId: string) => void;
 }
 
 export interface LogEntry {

@@ -1,6 +1,25 @@
 /* tslint:disable */
 /* eslint-disable */
 /**
+ * Validate raw key package bytes without constructing a KeyPackage object.
+ *
+ * Performs full validation: TLS deserialization, signature verification,
+ * protocol version check, lifetime check, init_key ≠ encryption_key.
+ *
+ * # Arguments
+ * * `bytes` - TLS-serialized KeyPackage bytes (from server API)
+ *
+ * # Returns
+ * `true` if the KeyPackage is valid, `false` otherwise.
+ *
+ * # Example
+ * ```javascript
+ * const isValid = validate_key_package_bytes(kpBytes);
+ * if (!isValid) console.warn("Invalid KeyPackage!");
+ * ```
+ */
+export function validate_key_package_bytes(bytes: Uint8Array): boolean;
+/**
  * Initialize the WASM module
  *
  * Call this once at startup to set up panic hooks for better error messages.
@@ -85,6 +104,7 @@ export class AddMessages {
   readonly proposal: Uint8Array;
   readonly commit: Uint8Array;
   readonly welcome: Uint8Array;
+  readonly group_info: Uint8Array | undefined;
 }
 /**
  * Bundle containing commit message and optional welcome
@@ -161,9 +181,23 @@ export class Group {
    */
   add_members(provider: Provider, sender: Identity, new_members: KeyPackage[]): CommitBundle;
   /**
+   * Add a user with multiple devices and commit immediately
+   *
+   * Each KeyPackage represents one device of the same user.
+   * All devices are added in a single commit.
+   */
+  add_user(provider: Provider, sender: Identity, device_key_packages: KeyPackage[]): CommitBundle;
+  /**
    * Remove members and commit immediately (convenience method)
    */
   remove_members(provider: Provider, sender: Identity, member_indices: Uint32Array): CommitBundle;
+  /**
+   * Remove ALL devices of a user by user_id and commit immediately
+   *
+   * A user with N devices will have N leaf nodes in the group.
+   * This method finds all of them and removes them in a single commit.
+   */
+  remove_user(provider: Provider, sender: Identity, user_id: string): CommitBundle;
   /**
    * Key rotation with immediate commit (convenience method)
    */
@@ -231,6 +265,14 @@ export class Group {
    */
   propose_add_member(provider: Provider, sender: Identity, new_member: KeyPackage): ProposalMessage;
   /**
+   * Propose adding a user with multiple devices (does NOT commit immediately)
+   *
+   * Each KeyPackage represents one device. Creates one add proposal
+   * per device, all queued as pending proposals.
+   * Call `commit_pending_proposals` to batch them into a single commit.
+   */
+  propose_add_user(provider: Provider, sender: Identity, device_key_packages: KeyPackage[]): ProposalMessage[];
+  /**
    * Propose removing a member by leaf index
    *
    * Use `member_by_user_id` to get the leaf index from a user_id.
@@ -241,8 +283,18 @@ export class Group {
    *
    * This is a convenience method that finds the member by credential
    * and proposes their removal.
+   * Note: This only removes ONE leaf node. For multi-device users,
+   * use `propose_remove_user` instead.
    */
   propose_remove_member_by_user_id(provider: Provider, sender: Identity, user_id: string): ProposalMessage;
+  /**
+   * Propose removing ALL devices of a user by user_id
+   *
+   * A user with N devices will have N leaf nodes. This creates
+   * one remove proposal per device. Call `commit_pending_proposals`
+   * after this to finalize all removals in a single commit.
+   */
+  propose_remove_user(provider: Provider, sender: Identity, user_id: string): ProposalMessage[];
   /**
    * Propose a self-update (key rotation for forward secrecy)
    */
@@ -277,9 +329,16 @@ export class Group {
    */
   members(): MemberInfo[];
   /**
-   * Get a member by user_id
+   * Get a member by user_id (returns first match)
    */
   member_by_user_id(user_id: string): MemberInfo | undefined;
+  /**
+   * Get ALL members (leaf nodes) for a given user_id
+   *
+   * A user with N devices will have N entries in the group.
+   * Use this to find all leaf indices for a multi-device user.
+   */
+  members_by_user_id(user_id: string): MemberInfo[];
   /**
    * Get the local member's leaf index
    */
@@ -325,6 +384,26 @@ export class Group {
    * ```
    */
   static create_with_cid(provider: Provider, founder: Identity, cid: string): Group;
+  /**
+   * Load a group from the Provider's storage by CID
+   *
+   * After restoring a Provider from bytes (IndexedDB), call this to reopen
+   * a group that was previously created or joined.
+   *
+   * # Arguments
+   * * `provider` - Crypto provider (restored from bytes)
+   * * `cid` - Channel ID (e.g., "team:channel_abc123")
+   */
+  static load(provider: Provider, cid: string): Group;
+  /**
+   * Persist the group's current state to the Provider's storage.
+   *
+   * MUST be called after processing application messages (decrypt) to save
+   * the updated ratchet/secret tree state. Without this, a Provider restore
+   * (e.g., on page reload) will load stale ratchet state, causing
+   * SecretReuseError for messages that were already decrypted.
+   */
+  save_state(provider: Provider): void;
   /**
    * Create a new group (legacy API, uses group_id string directly)
    */
@@ -523,6 +602,20 @@ export class ProposalMessage {
 export class Provider {
   free(): void;
   constructor();
+  /**
+   * Serialize the key store to bytes for persistence (e.g. IndexedDB)
+   *
+   * Returns the serialized key store as a byte array.
+   * Use `Provider.from_bytes()` to restore.
+   */
+  to_bytes(): Uint8Array;
+  /**
+   * Restore a Provider from previously serialized bytes
+   *
+   * The crypto provider (RNG) is always fresh; only the key store
+   * (private keys, group state, etc.) is restored from bytes.
+   */
+  static from_bytes(bytes: Uint8Array): Provider;
 }
 /**
  * Ratchet tree for group state synchronization
@@ -544,17 +637,6 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
-  readonly __wbg_mlserror_free: (a: number, b: number) => void;
-  readonly mlserror_new: (a: number, b: number, c: number) => number;
-  readonly mlserror_code: (a: number) => number;
-  readonly mlserror_message: (a: number) => [number, number];
-  readonly __wbg_ratchettree_free: (a: number, b: number) => void;
-  readonly ratchettree_to_bytes: (a: number) => [number, number];
-  readonly ratchettree_from_bytes: (a: number, b: number) => [number, number, number];
-  readonly __wbg_provider_free: (a: number, b: number) => void;
-  readonly provider_new: () => number;
-  readonly greet: () => void;
-  readonly init: () => void;
   readonly __wbg_commitbundle_free: (a: number, b: number) => void;
   readonly commitbundle_commit: (a: number) => [number, number];
   readonly commitbundle_welcome: (a: number) => [number, number];
@@ -566,13 +648,16 @@ export interface InitOutput {
   readonly group_merge_pending_commit: (a: number, b: number) => [number, number];
   readonly group_clear_pending_commit: (a: number, b: number) => [number, number];
   readonly group_add_members: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+  readonly group_add_user: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
   readonly group_remove_members: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+  readonly group_remove_user: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
   readonly group_self_update: (a: number, b: number, c: number) => [number, number, number];
   readonly group_propose_and_commit_add: (a: number, b: number, c: number, d: number) => [number, number, number];
   readonly __wbg_addmessages_free: (a: number, b: number) => void;
   readonly addmessages_proposal: (a: number) => any;
   readonly addmessages_commit: (a: number) => any;
   readonly addmessages_welcome: (a: number) => any;
+  readonly addmessages_group_info: (a: number) => [number, number];
   readonly __wbg_processedmessage_free: (a: number, b: number) => void;
   readonly processedmessage_message_type: (a: number) => number;
   readonly processedmessage_content: (a: number) => [number, number];
@@ -592,8 +677,10 @@ export interface InitOutput {
   readonly proposalmessage_proposal_ref: (a: number) => [number, number];
   readonly proposalmessage_bytes_as_uint8array: (a: number) => any;
   readonly group_propose_add_member: (a: number, b: number, c: number, d: number) => [number, number, number];
+  readonly group_propose_add_user: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
   readonly group_propose_remove_member: (a: number, b: number, c: number, d: number) => [number, number, number];
   readonly group_propose_remove_member_by_user_id: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+  readonly group_propose_remove_user: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
   readonly group_propose_self_update: (a: number, b: number, c: number) => [number, number, number];
   readonly group_pending_proposals_count: (a: number) => number;
   readonly group_clear_pending_proposals: (a: number, b: number) => [number, number];
@@ -607,6 +694,7 @@ export interface InitOutput {
   readonly group_epoch: (a: number) => bigint;
   readonly group_members: (a: number) => [number, number];
   readonly group_member_by_user_id: (a: number, b: number, c: number) => number;
+  readonly group_members_by_user_id: (a: number, b: number, c: number) => [number, number];
   readonly group_own_leaf_index: (a: number) => number;
   readonly group_is_operational: (a: number) => number;
   readonly group_has_pending_commit: (a: number) => number;
@@ -618,6 +706,8 @@ export interface InitOutput {
   readonly externaljoinresult_group: (a: number) => number;
   readonly externaljoinresult_commit: (a: number) => [number, number];
   readonly group_create_with_cid: (a: number, b: number, c: number, d: number) => [number, number, number];
+  readonly group_load: (a: number, b: number, c: number) => [number, number, number];
+  readonly group_save_state: (a: number, b: number) => [number, number];
   readonly group_create_new: (a: number, b: number, c: number, d: number) => number;
   readonly group_join_with_welcome: (a: number, b: number, c: number, d: number) => [number, number, number];
   readonly group_join: (a: number, b: number, c: number, d: number) => [number, number, number];
@@ -633,6 +723,20 @@ export interface InitOutput {
   readonly keypackage_to_bytes: (a: number) => [number, number];
   readonly keypackage_from_bytes: (a: number, b: number) => [number, number, number];
   readonly keypackage_hash_ref: (a: number, b: number) => [number, number, number, number];
+  readonly validate_key_package_bytes: (a: number, b: number) => number;
+  readonly __wbg_provider_free: (a: number, b: number) => void;
+  readonly provider_new: () => number;
+  readonly provider_to_bytes: (a: number) => [number, number, number, number];
+  readonly provider_from_bytes: (a: number, b: number) => [number, number, number];
+  readonly greet: () => void;
+  readonly init: () => void;
+  readonly __wbg_ratchettree_free: (a: number, b: number) => void;
+  readonly ratchettree_to_bytes: (a: number) => [number, number];
+  readonly ratchettree_from_bytes: (a: number, b: number) => [number, number, number];
+  readonly __wbg_mlserror_free: (a: number, b: number) => void;
+  readonly mlserror_new: (a: number, b: number, c: number) => number;
+  readonly mlserror_code: (a: number) => number;
+  readonly mlserror_message: (a: number) => [number, number];
   readonly __wbindgen_exn_store: (a: number) => void;
   readonly __externref_table_alloc: () => number;
   readonly __wbindgen_export_2: WebAssembly.Table;
