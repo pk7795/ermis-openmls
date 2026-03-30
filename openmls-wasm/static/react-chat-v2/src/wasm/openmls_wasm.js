@@ -686,6 +686,28 @@ export class Group {
         return CommitBundle.__wrap(ret[0]);
     }
     /**
+     * Remove multiple users (all their devices) and commit immediately
+     *
+     * Each user_id may have multiple leaf nodes (devices).
+     * This method finds ALL leaf nodes for ALL specified users
+     * and removes them in a single commit.
+     * @param {Provider} provider
+     * @param {Identity} sender
+     * @param {string[]} user_ids
+     * @returns {CommitBundle}
+     */
+    remove_users(provider, sender, user_ids) {
+        _assertClass(provider, Provider);
+        _assertClass(sender, Identity);
+        const ptr0 = passArrayJsValueToWasm0(user_ids, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.group_remove_users(this.__wbg_ptr, provider.__wbg_ptr, sender.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return CommitBundle.__wrap(ret[0]);
+    }
+    /**
      * Key rotation with immediate commit (convenience method)
      * @param {Provider} provider
      * @param {Identity} sender
@@ -957,6 +979,29 @@ export class Group {
             throw takeFromExternrefTable0(ret[1]);
         }
         return ProposalMessage.__wrap(ret[0]);
+    }
+    /**
+     * Leave the group by creating a self-remove proposal
+     *
+     * Creates a Remove Proposal for the caller's own leaf node.
+     * This proposal must be sent to the server and committed by another member.
+     * The caller should NOT commit this proposal themselves.
+     *
+     * Returns the serialized proposal message bytes.
+     * @param {Provider} provider
+     * @param {Identity} sender
+     * @returns {Uint8Array}
+     */
+    leave_group(provider, sender) {
+        _assertClass(provider, Provider);
+        _assertClass(sender, Identity);
+        const ret = wasm.group_leave_group(this.__wbg_ptr, provider.__wbg_ptr, sender.__wbg_ptr);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
     }
     /**
      * Get the number of pending proposals
@@ -2113,6 +2158,14 @@ function __wbg_get_imports() {
     imports.wbg.__wbindgen_memory = function() {
         const ret = wasm.memory;
         return ret;
+    };
+    imports.wbg.__wbindgen_string_get = function(arg0, arg1) {
+        const obj = arg1;
+        const ret = typeof(obj) === 'string' ? obj : undefined;
+        var ptr1 = isLikeNone(ret) ? 0 : passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len1 = WASM_VECTOR_LEN;
+        getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+        getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
     };
     imports.wbg.__wbindgen_string_new = function(arg0, arg1) {
         const ret = getStringFromWasm0(arg0, arg1);

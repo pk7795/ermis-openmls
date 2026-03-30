@@ -12,7 +12,8 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
     onAddMember,
     onRemoveMember,
     onExternalJoinPre,
-    onExternalJoinPost
+    onExternalJoinPost,
+    onKeyRotate
 }) => {
     const [input, setInput] = useState<string>('');
     const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -76,6 +77,15 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                                 onClick={() => onExternalJoinPost(userId)}
                             >
                                 External Join (Post)
+                            </button>
+                        )}
+                        {onKeyRotate && (
+                            <button
+                                className="btn btn-primary"
+                                style={{ padding: '4px 8px', fontSize: '12px' }}
+                                onClick={() => onKeyRotate(userId)}
+                            >
+                                Key Rotate
                             </button>
                         )}
                     </div>

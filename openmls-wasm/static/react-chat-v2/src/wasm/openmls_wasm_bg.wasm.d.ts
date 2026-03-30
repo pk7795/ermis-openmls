@@ -1,6 +1,10 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
+export const __wbg_mlserror_free: (a: number, b: number) => void;
+export const mlserror_new: (a: number, b: number, c: number) => number;
+export const mlserror_code: (a: number) => number;
+export const mlserror_message: (a: number) => [number, number];
 export const __wbg_commitbundle_free: (a: number, b: number) => void;
 export const commitbundle_commit: (a: number) => [number, number];
 export const commitbundle_welcome: (a: number) => [number, number];
@@ -15,6 +19,7 @@ export const group_add_members: (a: number, b: number, c: number, d: number, e: 
 export const group_add_user: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const group_remove_members: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const group_remove_user: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+export const group_remove_users: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const group_self_update: (a: number, b: number, c: number) => [number, number, number];
 export const group_propose_and_commit_add: (a: number, b: number, c: number, d: number) => [number, number, number];
 export const __wbg_addmessages_free: (a: number, b: number) => void;
@@ -46,6 +51,7 @@ export const group_propose_remove_member: (a: number, b: number, c: number, d: n
 export const group_propose_remove_member_by_user_id: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const group_propose_remove_user: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const group_propose_self_update: (a: number, b: number, c: number) => [number, number, number];
+export const group_leave_group: (a: number, b: number, c: number) => [number, number, number, number];
 export const group_pending_proposals_count: (a: number) => number;
 export const group_clear_pending_proposals: (a: number, b: number) => [number, number];
 export const __wbg_memberinfo_free: (a: number, b: number) => void;
@@ -97,10 +103,6 @@ export const init: () => void;
 export const __wbg_ratchettree_free: (a: number, b: number) => void;
 export const ratchettree_to_bytes: (a: number) => [number, number];
 export const ratchettree_from_bytes: (a: number, b: number) => [number, number, number];
-export const __wbg_mlserror_free: (a: number, b: number) => void;
-export const mlserror_new: (a: number, b: number, c: number) => number;
-export const mlserror_code: (a: number) => number;
-export const mlserror_message: (a: number) => [number, number];
 export const __wbindgen_exn_store: (a: number) => void;
 export const __externref_table_alloc: () => number;
 export const __wbindgen_export_2: WebAssembly.Table;

@@ -728,15 +728,6 @@ function App(): React.ReactElement {
 
                     {adminUserId && users.get(adminUserId)?.group && (
                         <button
-                            className="btn btn-primary"
-                            onClick={() => performKeyRotation(adminUserId)}
-                        >
-                            <RefreshCw size={18} /> Admin Key Rotation
-                        </button>
-                    )}
-
-                    {adminUserId && users.get(adminUserId)?.group && (
-                        <button
                             className="btn btn-success"
                             onClick={exportKey}
                         >
@@ -798,6 +789,7 @@ function App(): React.ReactElement {
                             onRemoveMember={(groupCreated && adminUserId && user?.group && uid !== adminUserId && users.get(adminUserId)?.group) ? removeMember : undefined}
                             onExternalJoinPre={(exportedGroupInfoPreMerge && !user?.group && uid !== adminUserId) ? () => performExternalJoin(uid, 'pre') : undefined}
                             onExternalJoinPost={(exportedGroupInfoPostMerge && !user?.group && uid !== adminUserId) ? () => performExternalJoin(uid, 'post') : undefined}
+                            onKeyRotate={user?.group ? performKeyRotation : undefined}
                         />
                     );
                 })}

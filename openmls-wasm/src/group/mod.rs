@@ -156,6 +156,7 @@ impl Group {
         // Must match the config used in create_with_cid for consistency.
         // See create_with_cid for detailed explanation of these values.
         let config = MlsGroupJoinConfig::builder()
+            .use_ratchet_tree_extension(true)
             .max_past_epochs(5)
             .sender_ratchet_configuration(SenderRatchetConfiguration::new(10, 2000))
             .build();
@@ -220,6 +221,7 @@ impl Group {
             verified_group_info,
             // Must match the config used in create_with_cid for consistency.
             &MlsGroupJoinConfig::builder()
+                .use_ratchet_tree_extension(true)
                 .max_past_epochs(5)
                 .sender_ratchet_configuration(SenderRatchetConfiguration::new(10, 2000))
                 .build(),

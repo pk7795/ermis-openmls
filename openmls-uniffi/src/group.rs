@@ -57,7 +57,7 @@ impl Group {
                 founder.credential_with_key.clone(),
             )
             .map_err(|e| {
-                eprintln!("[MLS] create_with_cid failed: {:?}", e);
+                mls_error!("[MLS] create_with_cid failed: {:?}", e);
                 MlsError::InternalError
             })?;
 
@@ -114,6 +114,7 @@ impl Group {
 
         // Must match the config used in create_with_cid for consistency.
         let config = MlsGroupJoinConfig::builder()
+            .use_ratchet_tree_extension(true)
             .max_past_epochs(5)
             .sender_ratchet_configuration(SenderRatchetConfiguration::new(10, 2000))
             .build();
@@ -123,12 +124,12 @@ impl Group {
         let mls_group =
             StagedWelcome::new_from_welcome(&*guard, &config, mls_welcome, ratchet_tree_in)
                 .map_err(|e| {
-                    eprintln!("[MLS] join_with_welcome: new_from_welcome failed: {:?}", e);
+                    mls_error!("[MLS] join_with_welcome: new_from_welcome failed: {:?}", e);
                     MlsError::InternalError
                 })?
                 .into_group(&*guard)
                 .map_err(|e| {
-                    eprintln!("[MLS] join_with_welcome: into_group failed: {:?}", e);
+                    mls_error!("[MLS] join_with_welcome: into_group failed: {:?}", e);
                     MlsError::InternalError
                 })?;
 
@@ -304,27 +305,52 @@ impl Group {
         provider: Arc<Provider>,
         msg: Vec<u8>,
     ) -> Result<ProcessedMessage, MlsError> {
+        mls_debug!(
+            "[MLS] process_message: msg_len={}, group_epoch={}",
+            msg.len(),
+            self.epoch()
+        );
+
         let mut msg_slice = msg.as_slice();
-        let mls_msg = MlsMessageIn::tls_deserialize(&mut msg_slice)
-            .map_err(|_| MlsError::DeserializationError)?;
+        let mls_msg = MlsMessageIn::tls_deserialize(&mut msg_slice).map_err(|e| {
+            mls_error!("[MLS] process_message: TLS deserialize FAILED: {:?}", e);
+            MlsError::DeserializationError
+        })?;
 
         let mut group = self.mls_group.lock().unwrap();
         let prov_guard = provider.lock();
 
         let processed_msg = match mls_msg.extract() {
-            MlsMessageBodyIn::PublicMessage(msg) => group
-                .process_message(&*prov_guard, msg)
-                .map_err(|_| MlsError::InvalidMessage)?,
-            MlsMessageBodyIn::PrivateMessage(msg) => group
-                .process_message(&*prov_guard, msg)
-                .map_err(|_| MlsError::InvalidMessage)?,
+            MlsMessageBodyIn::PublicMessage(msg) => {
+                mls_debug!("[MLS] process_message: msg_type=PublicMessage");
+                group.process_message(&*prov_guard, msg).map_err(|e| {
+                    mls_error!(
+                        "[MLS] process_message: PublicMessage processing FAILED: {:?}",
+                        e
+                    );
+                    MlsError::InvalidMessage
+                })?
+            }
+            MlsMessageBodyIn::PrivateMessage(msg) => {
+                mls_debug!("[MLS] process_message: msg_type=PrivateMessage");
+                group.process_message(&*prov_guard, msg).map_err(|e| {
+                    mls_error!(
+                        "[MLS] process_message: PrivateMessage processing FAILED: {:?}",
+                        e
+                    );
+                    MlsError::InvalidMessage
+                })?
+            }
             MlsMessageBodyIn::Welcome(_) => {
+                mls_debug!("[MLS] process_message: received Welcome — wrong message type for process_message");
                 return Err(MlsError::InvalidMessage);
             }
             MlsMessageBodyIn::GroupInfo(_) => {
+                mls_debug!("[MLS] process_message: received GroupInfo — wrong message type for process_message");
                 return Err(MlsError::InvalidMessage);
             }
             MlsMessageBodyIn::KeyPackage(_) => {
+                mls_debug!("[MLS] process_message: received KeyPackage — wrong message type for process_message");
                 return Err(MlsError::InvalidMessage);
             }
         };
@@ -343,14 +369,21 @@ impl Group {
 
         match processed_msg.into_content() {
             openmls::framing::ProcessedMessageContent::ApplicationMessage(app_msg) => {
-                // CRITICAL: Persist ratchet state after decrypting app messages.
-                // process_message advances the decryption ratchet in-memory but
-                // does NOT write it to Provider storage. Without this, a Provider
-                // restore loads stale ratchet state → SecretReuseError.
-                let prov_guard2 = provider.lock();
-                let _ = group.store(prov_guard2.storage());
-                drop(prov_guard2);
+                // NOTE: Ratchet state is advanced in-memory but NOT persisted here.
+                // The caller MUST call `save_state()` after storing the decrypted
+                // plaintext in their app database. This ensures that if the app
+                // crashes before saving plaintext, the message can be re-decrypted
+                // on next launch (ratchet key still in DB).
+                //
+                // Correct flow:
+                //   1. plaintext = process_message(ciphertext)
+                //   2. app_db.save(plaintext)        ← persist plaintext first
+                //   3. group.save_state(provider)    ← then advance ratchet in DB
 
+                mls_debug!(
+                    "[MLS] process_message: OK ApplicationMessage, epoch={}",
+                    epoch
+                );
                 Ok(ProcessedMessage {
                     message_type: MessageType::ApplicationMessage,
                     content: Some(app_msg.into_bytes()),
@@ -364,7 +397,14 @@ impl Group {
                 let prov_guard = provider.lock();
                 group
                     .store_pending_proposal(prov_guard.storage(), *proposal)
-                    .map_err(|_| MlsError::StorageError)?;
+                    .map_err(|e| {
+                        mls_error!(
+                            "[MLS] process_message: store_pending_proposal FAILED: {:?}",
+                            e
+                        );
+                        MlsError::StorageError
+                    })?;
+                mls_debug!("[MLS] process_message: OK Proposal, epoch={}", epoch);
                 Ok(ProcessedMessage {
                     message_type: MessageType::Proposal,
                     content: None,
@@ -377,7 +417,14 @@ impl Group {
                 let mut prov_guard = provider.lock();
                 group
                     .merge_staged_commit(&mut *prov_guard, *staged_commit)
-                    .map_err(|_| MlsError::InternalError)?;
+                    .map_err(|e| {
+                        mls_error!("[MLS] process_message: merge_staged_commit FAILED: {:?}", e);
+                        MlsError::InternalError
+                    })?;
+                mls_debug!(
+                    "[MLS] process_message: OK Commit, new_epoch={}",
+                    group.epoch().as_u64()
+                );
                 Ok(ProcessedMessage {
                     message_type: MessageType::Commit,
                     content: None,
@@ -597,6 +644,34 @@ impl Group {
         })
     }
 
+    /// Leave the group by creating a self-remove proposal
+    ///
+    /// Creates a Remove Proposal for the caller's own leaf node.
+    /// This proposal must be sent to the server and committed by another member.
+    /// Returns the serialized proposal message bytes.
+    pub fn leave_group(
+        &self,
+        provider: Arc<Provider>,
+        sender: Arc<Identity>,
+    ) -> Result<Vec<u8>, MlsError> {
+        let mut group = self.mls_group.lock().unwrap();
+        let prov_guard = provider.lock();
+
+        let proposal_msg = group
+            .leave_group(&*prov_guard, &sender.keypair)
+            .map_err(|e| {
+                mls_error!("[MLS] leave_group FAILED: {:?}", e);
+                MlsError::InternalError
+            })?;
+
+        let mut serialized = vec![];
+        proposal_msg
+            .tls_serialize(&mut serialized)
+            .map_err(|_| MlsError::SerializationError)?;
+
+        Ok(serialized)
+    }
+
     /// Get the number of pending proposals
     pub fn pending_proposals_count(&self) -> u64 {
         let group = self.mls_group.lock().unwrap();
@@ -627,11 +702,11 @@ impl Group {
 
         // Auto-clear stale pending commit from a previous failed operation
         if group.pending_commit().is_some() {
-            eprintln!("[MLS] commit_pending_proposals: clearing stale pending commit");
+            mls_debug!("[MLS] commit_pending_proposals: clearing stale pending commit");
             group
                 .clear_pending_commit(prov_guard.storage())
                 .map_err(|e| {
-                    eprintln!("[MLS] clear_pending_commit FAILED: {:?}", e);
+                    mls_error!("[MLS] clear_pending_commit FAILED: {:?}", e);
                     MlsError::InternalError
                 })?;
         }
@@ -639,7 +714,7 @@ impl Group {
         let (commit_msg, welcome_msg, group_info) = group
             .commit_to_pending_proposals(&*prov_guard, &sender.keypair)
             .map_err(|e| {
-                eprintln!("[MLS] commit_pending_proposals FAILED: {:?}", e);
+                mls_error!("[MLS] commit_pending_proposals FAILED: {:?}", e);
                 MlsError::InternalError
             })?;
 
@@ -650,12 +725,10 @@ impl Group {
     pub fn merge_pending_commit(&self, provider: Arc<Provider>) -> Result<(), MlsError> {
         let mut group = self.mls_group.lock().unwrap();
         let mut prov_guard = provider.lock();
-        group
-            .merge_pending_commit(&mut *prov_guard)
-            .map_err(|e| {
-                eprintln!("[MLS] merge_pending_commit FAILED: {:?}", e);
-                MlsError::InternalError
-            })
+        group.merge_pending_commit(&mut *prov_guard).map_err(|e| {
+            mls_error!("[MLS] merge_pending_commit FAILED: {:?}", e);
+            MlsError::InternalError
+        })
     }
 
     /// Discard the pending commit (rollback)
@@ -679,20 +752,18 @@ impl Group {
 
         // Auto-clear stale pending commit from a previous failed operation
         if group.pending_commit().is_some() {
-            eprintln!("[MLS] add_members: clearing stale pending commit");
+            mls_debug!("[MLS] add_members: clearing stale pending commit");
             group
                 .clear_pending_commit(prov_guard.storage())
                 .map_err(|e| {
-                    eprintln!("[MLS] clear_pending_commit FAILED: {:?}", e);
+                    mls_error!("[MLS] clear_pending_commit FAILED: {:?}", e);
                     MlsError::InternalError
                 })?;
         }
 
         // Collect existing members' signature keys to filter duplicates
-        let existing_sig_keys: std::collections::HashSet<Vec<u8>> = group
-            .members()
-            .map(|m| m.signature_key.clone())
-            .collect();
+        let existing_sig_keys: std::collections::HashSet<Vec<u8>> =
+            group.members().map(|m| m.signature_key.clone()).collect();
 
         let key_packages: Vec<_> = new_members
             .iter()
@@ -700,7 +771,7 @@ impl Group {
                 let sig_key = kp.inner.leaf_node().signature_key().as_slice().to_vec();
                 let is_dup = existing_sig_keys.contains(&sig_key);
                 if is_dup {
-                    eprintln!("[MLS] add_members: skipping duplicate signature key");
+                    mls_debug!("[MLS] add_members: skipping duplicate signature key");
                 }
                 !is_dup
             })
@@ -708,15 +779,19 @@ impl Group {
             .collect();
 
         if key_packages.is_empty() {
-            eprintln!("[MLS] add_members: all members already in group, nothing to add");
+            mls_debug!("[MLS] add_members: all members already in group, nothing to add");
             return Err(MlsError::InvalidState);
         }
 
-        eprintln!("[MLS] add_members: key_packages count={}, group epoch={}", key_packages.len(), group.epoch().as_u64());
+        mls_debug!(
+            "[MLS] add_members: key_packages count={}, group epoch={}",
+            key_packages.len(),
+            group.epoch().as_u64()
+        );
         let (commit_msg, welcome_msg, group_info) = group
             .add_members(&*prov_guard, &sender.keypair, &key_packages)
             .map_err(|e| {
-                eprintln!("[MLS] add_members FAILED: {:?}", e);
+                mls_error!("[MLS] add_members FAILED: {:?}", e);
                 MlsError::InternalError
             })?;
 
@@ -726,7 +801,8 @@ impl Group {
             .tls_serialize(&mut welcome_bytes)
             .map_err(|_| MlsError::SerializationError)?;
 
-        let commit_bundle = serialize_commit_bundle(&commit_msg, None::<&MlsMessageOut>, group_info)?;
+        let commit_bundle =
+            serialize_commit_bundle(&commit_msg, None::<&MlsMessageOut>, group_info)?;
         Ok(CommitBundle {
             commit: commit_bundle.commit,
             welcome: Some(welcome_bytes),
@@ -760,14 +836,36 @@ impl Group {
         let mut group = self.mls_group.lock().unwrap();
         let prov_guard = provider.lock();
 
+        // Auto-clear stale pending commit from a previous failed operation
+        if group.pending_commit().is_some() {
+            mls_debug!("[MLS] remove_members: clearing stale pending commit");
+            group
+                .clear_pending_commit(prov_guard.storage())
+                .map_err(|e| {
+                    mls_error!("[MLS] remove_members: clear_pending_commit FAILED: {:?}", e);
+                    MlsError::InternalError
+                })?;
+        }
+
+        let own_index = group.own_leaf_index().u32();
         let leaf_indices: Vec<_> = member_indices
             .iter()
             .map(|i| LeafNodeIndex::new(*i))
             .collect();
+        mls_debug!(
+            "[MLS] remove_members: removing {} leaf indices {:?} (own_index={}, epoch={})",
+            leaf_indices.len(),
+            member_indices,
+            own_index,
+            group.epoch().as_u64()
+        );
 
         let (commit_msg, welcome_msg, group_info) = group
             .remove_members(&*prov_guard, &sender.keypair, &leaf_indices)
-            .map_err(|_| MlsError::InternalError)?;
+            .map_err(|e| {
+                mls_error!("[MLS] remove_members FAILED: {:?}", e);
+                MlsError::InternalError
+            })?;
 
         serialize_commit_bundle(&commit_msg, welcome_msg.as_ref(), group_info)
     }
@@ -787,6 +885,66 @@ impl Group {
             .iter()
             .map(|m| m.index)
             .collect();
+
+        if member_indices.is_empty() {
+            return Err(MlsError::MemberNotFound);
+        }
+
+        self.remove_members(provider, sender, member_indices)
+    }
+
+    /// Remove multiple users (all their devices) and commit immediately
+    ///
+    /// Each user_id may have multiple leaf nodes (devices).
+    /// This method finds ALL leaf nodes for ALL specified users
+    /// and removes them in a single commit.
+    pub fn remove_users(
+        &self,
+        provider: Arc<Provider>,
+        sender: Arc<Identity>,
+        user_ids: Vec<String>,
+    ) -> Result<CommitBundle, MlsError> {
+        // Diagnostic: dump all group members for debugging
+        let all_members = self.members();
+        let own_index = self.own_leaf_index();
+        mls_debug!(
+            "[MLS] remove_users: target_user_ids={:?}, own_leaf_index={}, sender_user_id={}",
+            user_ids,
+            own_index,
+            sender.user_id()
+        );
+        for m in &all_members {
+            mls_debug!(
+                "[MLS]   member: index={}, user_id=\"{}\"{}",
+                m.index,
+                m.user_id,
+                if m.index == own_index {
+                    " ← SELF"
+                } else {
+                    ""
+                }
+            );
+        }
+
+        let mut member_indices: Vec<u32> = Vec::new();
+
+        for user_id in &user_ids {
+            let indices: Vec<u32> = self
+                .members_by_user_id(user_id.clone())
+                .iter()
+                .map(|m| m.index)
+                .collect();
+            mls_debug!(
+                "[MLS] remove_users: user_id=\"{}\" → matched leaf indices: {:?}",
+                user_id,
+                indices
+            );
+            member_indices.extend(indices);
+        }
+
+        // Deduplicate in case of overlapping queries
+        member_indices.sort();
+        member_indices.dedup();
 
         if member_indices.is_empty() {
             return Err(MlsError::MemberNotFound);
@@ -835,8 +993,8 @@ pub fn join_external(
     // group_info bytes are TLS-serialized MlsMessageOut (from export_group_info)
     // → deserialize as MlsMessageIn first, then extract the GroupInfo body
     let mut gi_slice = group_info.as_slice();
-    let mls_message = MlsMessageIn::tls_deserialize(&mut gi_slice)
-        .map_err(|_| MlsError::DeserializationError)?;
+    let mls_message =
+        MlsMessageIn::tls_deserialize(&mut gi_slice).map_err(|_| MlsError::DeserializationError)?;
 
     let verified_group_info = match mls_message.extract() {
         MlsMessageBodyIn::GroupInfo(gi) => Ok(gi),
@@ -853,6 +1011,7 @@ pub fn join_external(
         verified_group_info,
         // Must match the config used in create_with_cid for consistency.
         &MlsGroupJoinConfig::builder()
+            .use_ratchet_tree_extension(true)
             .max_past_epochs(5)
             .sender_ratchet_configuration(SenderRatchetConfiguration::new(10, 2000))
             .build(),

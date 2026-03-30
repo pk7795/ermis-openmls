@@ -3,6 +3,8 @@
 //! This crate mirrors the API surface of `openmls-wasm` but uses Mozilla UniFFI
 //! to generate native Swift and Kotlin bindings instead of wasm-bindgen.
 
+#[macro_use]
+pub mod logger;
 pub mod errors;
 pub mod group;
 pub mod identity;
@@ -12,6 +14,7 @@ pub mod types;
 pub use errors::*;
 pub use group::*;
 pub use identity::*;
+pub use logger::init_logger;
 pub use provider::*;
 pub use types::*;
 

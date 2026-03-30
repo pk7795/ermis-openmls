@@ -1,4 +1,6 @@
 namespace openmls_uniffi {
+    void init_logger();
+
     [Throws=MlsError]
     ExternalJoinResult join_external(Provider provider, Identity identity, bytes group_info, RatchetTree? ratchet_tree);
 
@@ -184,6 +186,9 @@ interface Group {
     [Throws=MlsError]
     ProposalMessage propose_self_update(Provider provider, Identity sender);
 
+    [Throws=MlsError]
+    bytes leave_group(Provider provider, Identity sender);
+
     u64 pending_proposals_count();
 
     [Throws=MlsError]
@@ -210,6 +215,9 @@ interface Group {
 
     [Throws=MlsError]
     CommitBundle remove_user(Provider provider, Identity sender, string user_id);
+
+    [Throws=MlsError]
+    CommitBundle remove_users(Provider provider, Identity sender, sequence<string> user_ids);
 
     [Throws=MlsError]
     sequence<ProposalMessage> propose_remove_user(Provider provider, Identity sender, string user_id);

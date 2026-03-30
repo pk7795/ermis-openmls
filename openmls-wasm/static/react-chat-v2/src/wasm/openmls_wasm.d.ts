@@ -199,6 +199,14 @@ export class Group {
    */
   remove_user(provider: Provider, sender: Identity, user_id: string): CommitBundle;
   /**
+   * Remove multiple users (all their devices) and commit immediately
+   *
+   * Each user_id may have multiple leaf nodes (devices).
+   * This method finds ALL leaf nodes for ALL specified users
+   * and removes them in a single commit.
+   */
+  remove_users(provider: Provider, sender: Identity, user_ids: string[]): CommitBundle;
+  /**
    * Key rotation with immediate commit (convenience method)
    */
   self_update(provider: Provider, sender: Identity): CommitBundle;
@@ -299,6 +307,16 @@ export class Group {
    * Propose a self-update (key rotation for forward secrecy)
    */
   propose_self_update(provider: Provider, sender: Identity): ProposalMessage;
+  /**
+   * Leave the group by creating a self-remove proposal
+   *
+   * Creates a Remove Proposal for the caller's own leaf node.
+   * This proposal must be sent to the server and committed by another member.
+   * The caller should NOT commit this proposal themselves.
+   *
+   * Returns the serialized proposal message bytes.
+   */
+  leave_group(provider: Provider, sender: Identity): Uint8Array;
   /**
    * Get the number of pending proposals
    */
@@ -637,6 +655,10 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
+  readonly __wbg_mlserror_free: (a: number, b: number) => void;
+  readonly mlserror_new: (a: number, b: number, c: number) => number;
+  readonly mlserror_code: (a: number) => number;
+  readonly mlserror_message: (a: number) => [number, number];
   readonly __wbg_commitbundle_free: (a: number, b: number) => void;
   readonly commitbundle_commit: (a: number) => [number, number];
   readonly commitbundle_welcome: (a: number) => [number, number];
@@ -651,6 +673,7 @@ export interface InitOutput {
   readonly group_add_user: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
   readonly group_remove_members: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
   readonly group_remove_user: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+  readonly group_remove_users: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
   readonly group_self_update: (a: number, b: number, c: number) => [number, number, number];
   readonly group_propose_and_commit_add: (a: number, b: number, c: number, d: number) => [number, number, number];
   readonly __wbg_addmessages_free: (a: number, b: number) => void;
@@ -682,6 +705,7 @@ export interface InitOutput {
   readonly group_propose_remove_member_by_user_id: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
   readonly group_propose_remove_user: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
   readonly group_propose_self_update: (a: number, b: number, c: number) => [number, number, number];
+  readonly group_leave_group: (a: number, b: number, c: number) => [number, number, number, number];
   readonly group_pending_proposals_count: (a: number) => number;
   readonly group_clear_pending_proposals: (a: number, b: number) => [number, number];
   readonly __wbg_memberinfo_free: (a: number, b: number) => void;
@@ -733,10 +757,6 @@ export interface InitOutput {
   readonly __wbg_ratchettree_free: (a: number, b: number) => void;
   readonly ratchettree_to_bytes: (a: number) => [number, number];
   readonly ratchettree_from_bytes: (a: number, b: number) => [number, number, number];
-  readonly __wbg_mlserror_free: (a: number, b: number) => void;
-  readonly mlserror_new: (a: number, b: number, c: number) => number;
-  readonly mlserror_code: (a: number) => number;
-  readonly mlserror_message: (a: number) => [number, number];
   readonly __wbindgen_exn_store: (a: number) => void;
   readonly __externref_table_alloc: () => number;
   readonly __wbindgen_export_2: WebAssembly.Table;

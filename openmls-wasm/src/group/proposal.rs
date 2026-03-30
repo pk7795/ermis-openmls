@@ -191,6 +191,30 @@ impl Group {
         ))
     }
 
+    /// Leave the group by creating a self-remove proposal
+    ///
+    /// Creates a Remove Proposal for the caller's own leaf node.
+    /// This proposal must be sent to the server and committed by another member.
+    /// The caller should NOT commit this proposal themselves.
+    ///
+    /// Returns the serialized proposal message bytes.
+    pub fn leave_group(
+        &mut self,
+        provider: &Provider,
+        sender: &Identity,
+    ) -> Result<Vec<u8>, JsError> {
+        let proposal_msg = self
+            .mls_group
+            .leave_group(provider.as_ref(), &sender.keypair)?;
+
+        let mut serialized = vec![];
+        proposal_msg
+            .tls_serialize(&mut serialized)
+            .map_err(|e| JsError::new(&format!("Failed to serialize leave proposal: {e}")))?;
+
+        Ok(serialized)
+    }
+
     /// Get the number of pending proposals
     pub fn pending_proposals_count(&self) -> usize {
         self.mls_group.pending_proposals().count()

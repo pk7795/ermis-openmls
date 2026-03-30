@@ -267,6 +267,42 @@ impl Group {
         self.remove_members(provider, sender, &member_indices)
     }
 
+    /// Remove multiple users (all their devices) and commit immediately
+    ///
+    /// Each user_id may have multiple leaf nodes (devices).
+    /// This method finds ALL leaf nodes for ALL specified users
+    /// and removes them in a single commit.
+    pub fn remove_users(
+        &mut self,
+        provider: &Provider,
+        sender: &Identity,
+        user_ids: Vec<String>,
+    ) -> Result<CommitBundle, JsError> {
+        let mut member_indices: Vec<u32> = Vec::new();
+
+        for user_id in &user_ids {
+            let indices: Vec<u32> = self
+                .members_by_user_id(user_id)
+                .iter()
+                .map(|m| m.index())
+                .collect();
+            member_indices.extend(indices);
+        }
+
+        // Deduplicate in case of overlapping queries
+        member_indices.sort();
+        member_indices.dedup();
+
+        if member_indices.is_empty() {
+            return Err(JsError::new(&format!(
+                "No members found for user_ids: {:?}",
+                user_ids
+            )));
+        }
+
+        self.remove_members(provider, sender, &member_indices)
+    }
+
     /// Key rotation with immediate commit (convenience method)
     pub fn self_update(
         &mut self,
