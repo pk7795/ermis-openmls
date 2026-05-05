@@ -120,6 +120,40 @@ pub fn greet() {
     alert("Hello from OpenMLS WASM!");
 }
 
+/// Compute the deterministic channel_id for E2EE Messaging (DM) channels.
+///
+/// Replicates the server-side `hash_channel_id()` in bellboy/src/util/check.rs.
+/// Only needed for E2EE DM creation — standard (non-E2EE) Messaging channels
+/// have their channel_id computed server-side.
+///
+/// Algorithm:
+/// 1. Sort user_ids alphabetically
+/// 2. Concatenate (no separator)
+/// 3. SHA-256 → hex string
+/// 4. Truncate to 36 chars
+/// 5. Return "{project_id}:{hash36}"
+///
+/// # Example
+/// ```javascript
+/// const channelId = hash_channel_id("proj-uuid", ["alice", "bob"]);
+/// const cid = `messaging:${channelId}`;
+/// const group = Group.create_with_cid(provider, identity, cid);
+/// ```
+#[wasm_bindgen]
+pub fn hash_channel_id(project_id: &str, user_ids: Vec<String>) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut sorted_ids = user_ids;
+    sorted_ids.sort();
+    let concatenated = sorted_ids.join("");
+
+    let mut hasher = Sha256::new();
+    hasher.update(concatenated.as_bytes());
+    let hash_hex = hex::encode(hasher.finalize());
+
+    format!("{}:{}", project_id, &hash_hex[..36])
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -317,5 +351,26 @@ mod tests {
         // Generate a new key package from restored provider — would panic
         // if the signature key pair wasn't restored
         let _kp2 = alice_restored.key_package(&restored);
+    }
+
+    #[test]
+    fn test_hash_channel_id() {
+        // Deterministic: order of user_ids must not affect result
+        let id1 = hash_channel_id("proj-123", vec!["alice".into(), "bob".into()]);
+        let id2 = hash_channel_id("proj-123", vec!["bob".into(), "alice".into()]);
+        assert_eq!(id1, id2, "Order should not matter — sort is deterministic");
+
+        // Format: "{project_id}:{36 hex chars}"
+        let parts: Vec<&str> = id1.splitn(2, ':').collect();
+        assert_eq!(parts[0], "proj-123");
+        assert_eq!(parts[1].len(), 36);
+
+        // Different members → different hash
+        let id3 = hash_channel_id("proj-123", vec!["alice".into(), "charlie".into()]);
+        assert_ne!(id1, id3);
+
+        // Different project → different hash
+        let id4 = hash_channel_id("proj-456", vec!["alice".into(), "bob".into()]);
+        assert_ne!(id1, id4);
     }
 }

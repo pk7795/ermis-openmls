@@ -29,6 +29,8 @@ tls_codec = { workspace = true }
 # code size when deploying.
 console_error_panic_hook = { version = "0.1.7", optional = true }
 js-sys = "0.3.68"
+sha2 = "0.10"
+hex = "0.4"
 
 # currently, this dependency is required
 # to enable the getrandom backend needed for

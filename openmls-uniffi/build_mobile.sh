@@ -132,6 +132,26 @@ build_android() {
         log "  ✓ $target ($abi) built"
     done
 
+    # Verify 16KB page alignment (required by Android 15+)
+    log "Verifying 16KB page alignment..."
+    local alignment_ok=true
+    for so_file in $(find "$OUT_DIR/android/jniLibs" -name "*.so"); do
+        local p_align
+        p_align=$(llvm-readelf -l "$so_file" 2>/dev/null | grep LOAD | awk '{print $NF}' | head -1)
+        if [ "$p_align" = "0x4000" ]; then
+            log "  ✓ $(basename "$so_file") [$(basename "$(dirname "$so_file")")] p_align=$p_align"
+        else
+            error "  ✗ $(basename "$so_file") [$(basename "$(dirname "$so_file")")] p_align=$p_align (expected 0x4000)"
+            alignment_ok=false
+        fi
+    done
+
+    if [ "$alignment_ok" = false ]; then
+        error "16KB page alignment check FAILED. Check .cargo/config.toml for missing rustflags."
+        exit 1
+    fi
+    log "✓ All .so files have correct 16KB page alignment"
+
     log "✓ Android libraries created at $OUT_DIR/android/jniLibs/"
 }
 
