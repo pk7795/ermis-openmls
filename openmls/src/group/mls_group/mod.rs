@@ -54,12 +54,17 @@ mod exporting;
 mod updates;
 
 use config::*;
+pub use epoch_archive::{
+    decrypt_with_epoch_archive, peek_sender_data_from_archive, ArchivedPlaintext,
+    ArchivedSenderData, EpochArchiveError, RecoveryDecryptOptions,
+};
 
 // Crate
 pub(crate) mod builder;
 pub(crate) mod commit_builder;
 pub(crate) mod config;
 pub(crate) mod creation;
+pub(crate) mod epoch_archive;
 pub(crate) mod errors;
 pub(crate) mod membership;
 pub(crate) mod past_secrets;

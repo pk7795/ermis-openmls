@@ -349,6 +349,62 @@ impl SecretTree {
         }
     }
 
+    /// Return RatchetSecrets for recovery from an archived epoch.
+    ///
+    /// This differs from [`Self::secret_for_decryption`] in one important way:
+    /// if the archived tree belongs to the original sender, the sender ratchet
+    /// is an encryption ratchet. Recovery still needs to derive the same key
+    /// material for historical ciphertext, so this method advances that
+    /// encryption ratchet up to the requested generation.
+    pub(crate) fn secret_for_recovery(
+        &mut self,
+        ciphersuite: Ciphersuite,
+        crypto: &impl OpenMlsCrypto,
+        index: LeafNodeIndex,
+        secret_type: SecretType,
+        generation: u32,
+        configuration: &SenderRatchetConfiguration,
+    ) -> Result<RatchetKeyMaterial, SecretTreeError> {
+        log::debug!(
+            "Generating {secret_type:?} recovery secret for {index:?} in generation {generation} with {ciphersuite}",
+        );
+        if index.u32() >= self.size.leaf_count() {
+            log::error!("Sender index is not in the tree.");
+            return Err(SecretTreeError::IndexOutOfBounds);
+        }
+        if self.ratchet_opt(index, secret_type)?.is_none() {
+            log::trace!("   initialize sender ratchets");
+            self.initialize_sender_ratchets(ciphersuite, crypto, index)?;
+        }
+        match self.ratchet_mut(index, secret_type)? {
+            SenderRatchet::EncryptionRatchet(enc_ratchet) => {
+                let current_generation = enc_ratchet.generation();
+                if current_generation < u32::MAX - configuration.maximum_forward_distance()
+                    && generation > current_generation + configuration.maximum_forward_distance()
+                {
+                    return Err(SecretTreeError::TooDistantInTheFuture);
+                }
+                if generation < current_generation {
+                    return Err(SecretTreeError::TooDistantInThePast);
+                }
+                loop {
+                    let (derived_generation, key_material) =
+                        enc_ratchet.ratchet_forward(crypto, ciphersuite)?;
+                    if derived_generation == generation {
+                        return Ok(key_material);
+                    }
+                    if derived_generation > generation {
+                        return Err(SecretTreeError::TooDistantInThePast);
+                    }
+                }
+            }
+            SenderRatchet::DecryptionRatchet(dec_ratchet) => {
+                log::trace!("   getting secret for recovery decryption");
+                dec_ratchet.secret_for_decryption(ciphersuite, crypto, generation, configuration)
+            }
+        }
+    }
+
     /// Return the next RatchetSecrets that should be used for encryption and
     /// then increments the generation.
     pub(crate) fn secret_for_encryption(

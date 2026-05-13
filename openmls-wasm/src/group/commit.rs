@@ -263,7 +263,9 @@ impl Group {
             .collect();
 
         if member_indices.is_empty() {
-            return Err(JsError::new(&format!("No members found for user_id: {user_id}")));
+            return Err(JsError::new(&format!(
+                "No members found for user_id: {user_id}"
+            )));
         }
 
         self.remove_members(provider, sender, &member_indices)

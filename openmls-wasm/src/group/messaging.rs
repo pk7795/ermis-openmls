@@ -1,6 +1,13 @@
 //! Message encryption and processing
 
-use openmls::framing::{MlsMessageBodyIn, MlsMessageIn};
+use openmls::{
+    framing::{MlsMessageBodyIn, MlsMessageIn},
+    group::{
+        decrypt_with_epoch_archive as openmls_decrypt_with_epoch_archive,
+        peek_sender_data_from_archive as openmls_peek_sender_data_from_archive,
+        RecoveryDecryptOptions,
+    },
+};
 use openmls_traits::OpenMlsProvider;
 use tls_codec::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -27,6 +34,99 @@ pub struct ProcessedMessage {
     sender_index: u32,
     epoch: u64,
     aad: Vec<u8>,
+}
+
+/// Sender data decoded from an archived epoch.
+#[wasm_bindgen]
+pub struct ArchivedSenderData {
+    sender_index: u32,
+    generation: u32,
+    epoch: u64,
+    content_type: String,
+    own_message: bool,
+}
+
+#[wasm_bindgen]
+impl ArchivedSenderData {
+    /// Get the sender's leaf index.
+    #[wasm_bindgen(getter)]
+    pub fn sender_index(&self) -> u32 {
+        self.sender_index
+    }
+
+    /// Get the sender ratchet generation.
+    #[wasm_bindgen(getter)]
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    /// Get the MLS epoch.
+    #[wasm_bindgen(getter)]
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Get the MLS content type.
+    #[wasm_bindgen(getter)]
+    pub fn content_type(&self) -> String {
+        self.content_type.clone()
+    }
+
+    /// Whether this message was sent by the archive owner's own leaf.
+    #[wasm_bindgen(getter)]
+    pub fn own_message(&self) -> bool {
+        self.own_message
+    }
+}
+
+/// Application plaintext recovered from an archived epoch.
+#[wasm_bindgen]
+pub struct ArchivedMessage {
+    content: Vec<u8>,
+    sender_index: u32,
+    generation: u32,
+    epoch: u64,
+    aad: Vec<u8>,
+    own_message: bool,
+}
+
+#[wasm_bindgen]
+impl ArchivedMessage {
+    /// Get the decrypted application content.
+    #[wasm_bindgen(getter)]
+    pub fn content(&self) -> Vec<u8> {
+        self.content.clone()
+    }
+
+    /// Get the sender's leaf index.
+    #[wasm_bindgen(getter)]
+    pub fn sender_index(&self) -> u32 {
+        self.sender_index
+    }
+
+    /// Get the sender ratchet generation.
+    #[wasm_bindgen(getter)]
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    /// Get the MLS epoch.
+    #[wasm_bindgen(getter)]
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Get the additional authenticated data.
+    #[wasm_bindgen(getter)]
+    pub fn aad(&self) -> Vec<u8> {
+        self.aad.clone()
+    }
+
+    /// Whether this message was sent by the archive owner's own leaf.
+    #[wasm_bindgen(getter)]
+    pub fn own_message(&self) -> bool {
+        self.own_message
+    }
 }
 
 #[wasm_bindgen]
@@ -76,6 +176,57 @@ impl ProcessedMessage {
     pub fn is_commit(&self) -> bool {
         self.message_type == MessageType::Commit
     }
+}
+
+/// Decrypt sender data using an archived epoch without consuming the message ratchet.
+#[wasm_bindgen]
+pub fn peek_sender_data_from_archive(
+    provider: &Provider,
+    archive: &[u8],
+    ciphertext: &[u8],
+) -> Result<ArchivedSenderData, JsError> {
+    let sender_data =
+        openmls_peek_sender_data_from_archive(provider.0.crypto(), archive, ciphertext)
+            .map_err(|e| JsError::new(&format!("Peek archived sender data error: {e}")))?;
+    Ok(ArchivedSenderData {
+        sender_index: sender_data.sender_index,
+        generation: sender_data.generation,
+        epoch: sender_data.epoch,
+        content_type: format!("{:?}", sender_data.content_type),
+        own_message: sender_data.own_message,
+    })
+}
+
+/// Decrypt and verify an MLS private message using archived epoch state.
+///
+/// `max_forward_distance` uses `0` as "use archive default".
+#[wasm_bindgen]
+pub fn decrypt_with_epoch_archive(
+    provider: &Provider,
+    archive: &[u8],
+    ciphertext: &[u8],
+    allow_own_messages: bool,
+    max_forward_distance: u32,
+) -> Result<ArchivedMessage, JsError> {
+    let max_forward_distance = (max_forward_distance != 0).then_some(max_forward_distance);
+    let plaintext = openmls_decrypt_with_epoch_archive(
+        provider.0.crypto(),
+        archive,
+        ciphertext,
+        RecoveryDecryptOptions {
+            allow_own_messages,
+            max_forward_distance,
+        },
+    )
+    .map_err(|e| JsError::new(&format!("Decrypt with epoch archive error: {e}")))?;
+    Ok(ArchivedMessage {
+        content: plaintext.content,
+        sender_index: plaintext.sender_index,
+        generation: plaintext.generation,
+        epoch: plaintext.epoch,
+        aad: plaintext.aad,
+        own_message: plaintext.own_message,
+    })
 }
 
 // Messaging methods for Group

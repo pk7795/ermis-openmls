@@ -206,6 +206,65 @@ impl PrivateMessageIn {
         Ok(verifiable)
     }
 
+    /// Decrypt this [`PrivateMessage`] into a
+    /// [`VerifiableAuthenticatedContent`] using archived epoch state.
+    ///
+    /// The archived state can belong to the original sender. In that case the
+    /// sender ratchet is an encryption ratchet, so the recovery path must derive
+    /// key material through `secret_for_recovery` instead of the normal inbound
+    /// decryption path.
+    pub(crate) fn to_verifiable_content_for_recovery(
+        &self,
+        ciphersuite: Ciphersuite,
+        crypto: &impl OpenMlsCrypto,
+        message_secrets: &mut MessageSecrets,
+        sender_index: LeafNodeIndex,
+        sender_ratchet_configuration: &SenderRatchetConfiguration,
+        sender_data: MlsSenderData,
+    ) -> Result<VerifiableAuthenticatedContentIn, MessageDecryptionError> {
+        let secret_type = SecretType::from(&self.content_type);
+        let (ratchet_key, ratchet_nonce) = message_secrets
+            .secret_tree_mut()
+            .secret_for_recovery(
+                ciphersuite,
+                crypto,
+                sender_index,
+                secret_type,
+                sender_data.generation,
+                sender_ratchet_configuration,
+            )
+            .map_err(|e| {
+                log::error!(
+                    "  Ciphertext generation out of bounds {}\n\t{e:?}",
+                    sender_data.generation
+                );
+                MessageDecryptionError::SecretTreeError(e)
+            })?;
+        let prepared_nonce = ratchet_nonce.xor_with_reuse_guard(&sender_data.reuse_guard);
+        let private_message_content = self.decrypt(crypto, ratchet_key, &prepared_nonce)?;
+
+        let sender = Sender::from_sender_data(sender_data);
+        log_content!(
+            trace,
+            "  Successfully decoded archived PublicMessage with: {:x?}",
+            private_message_content.content
+        );
+
+        let verifiable = VerifiableAuthenticatedContentIn::new(
+            WireFormat::PrivateMessage,
+            FramedContentIn {
+                group_id: self.group_id.clone(),
+                epoch: self.epoch,
+                sender,
+                authenticated_data: self.authenticated_data.clone(),
+                body: private_message_content.content,
+            },
+            Some(message_secrets.serialized_context().to_vec()),
+            private_message_content.auth,
+        );
+        Ok(verifiable)
+    }
+
     /// Get the `group_id` in the `PrivateMessage`.
     pub(crate) fn group_id(&self) -> &GroupId {
         &self.group_id

@@ -212,8 +212,9 @@ impl Group {
         // group_info bytes are TLS-serialized MlsMessageOut (from export_group_info)
         // → deserialize as MlsMessageIn first, then extract the GroupInfo body
         let mut gi_slice = group_info;
-        let mls_message = MlsMessageIn::tls_deserialize(&mut gi_slice)
-            .map_err(|e| JsError::new(&format!("GroupInfo MlsMessage deserialization error: {e}")))?;
+        let mls_message = MlsMessageIn::tls_deserialize(&mut gi_slice).map_err(|e| {
+            JsError::new(&format!("GroupInfo MlsMessage deserialization error: {e}"))
+        })?;
 
         let verified_group_info = match mls_message.extract() {
             MlsMessageBodyIn::GroupInfo(gi) => Ok(gi),
