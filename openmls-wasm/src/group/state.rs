@@ -124,6 +124,17 @@ impl Group {
         RatchetTree(self.mls_group.export_ratchet_tree().into())
     }
 
+    /// Export the current epoch archive for historical message recovery.
+    ///
+    /// The returned bytes contain MLS secret material. Applications must encrypt
+    /// them with their PIN/vault key before uploading or persisting outside the
+    /// local device.
+    pub fn archive_current_epoch(&self) -> Result<Vec<u8>, JsError> {
+        self.mls_group
+            .export_current_epoch_archive()
+            .map_err(|e| JsError::new(&format!("Archive current epoch error: {e}")))
+    }
+
     /// Export group info for external commits
     ///
     /// # Arguments
