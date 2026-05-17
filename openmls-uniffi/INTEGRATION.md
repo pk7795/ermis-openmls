@@ -52,9 +52,14 @@ let provider = Provider()
 
 // Option 2: Persistent SQLite (RECOMMENDED for production)
 let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-let dbPath = documentsDir.appendingPathComponent("openmls.db").path
+let safeUserId = currentUserId.replacingOccurrences(
+    of: "[^A-Za-z0-9._-]",
+    with: "_",
+    options: .regularExpression
+)
+let dbPath = documentsDir.appendingPathComponent("openmls_\(safeUserId).db").path
 let provider = try Provider.newWithPath(dbPath: dbPath)
-// → MLS state (groups, keys, epochs) automatically saved to openmls.db
+// → MLS state (groups, keys, epochs) automatically saved to this user's DB
 // → State persists across app restarts
 
 // Create identity
@@ -194,7 +199,8 @@ import uniffi.openmls_uniffi.*
 val provider = Provider()
 
 // Option 2: Persistent SQLite (RECOMMENDED for production)
-val dbPath = "${context.filesDir}/openmls.db"
+val safeUserId = currentUserId.replace(Regex("[^A-Za-z0-9._-]"), "_")
+val dbPath = "${context.filesDir}/openmls_${safeUserId}.db"
 val provider = Provider.newWithPath(dbPath)
 // → MLS state automatically persisted to SQLite file
 
@@ -334,11 +340,11 @@ class OpenMlsTests: XCTestCase {
 | `storedGroupIds()` | List all stored group CIDs |
 | `groupCount()` | Count stored groups |
 | `deleteGroup(cid)` | Delete all data for one group |
-| `deleteAllGroups()` | Delete all group data (logout/reset) |
+| `deleteAllGroups()` | Delete all group data for local reset/wipe |
 | **Identity Persistence** | |
 | `storeIdentity(userId, bytes)` | Store identity in DB (replaces previous) |
 | `loadIdentity()` | Load identity bytes (nil if none) |
-| `deleteIdentity()` | Delete stored identity (logout) |
+| `deleteIdentity()` | Delete stored identity for local reset/wipe |
 
 ### Group API
 
@@ -364,12 +370,17 @@ class MlsManager {
     private(set) var identity: Identity?
     private(set) var groups: [String: Group] = [:]
     
-    /// Call once on app launch
-    func initialize() throws {
+    /// Call after login with the authenticated user id.
+    func initialize(userId: String) throws {
         let documentsDir = FileManager.default.urls(
             for: .documentDirectory, in: .userDomainMask
         ).first!
-        let dbPath = documentsDir.appendingPathComponent("openmls.db").path
+        let safeUserId = userId.replacingOccurrences(
+            of: "[^A-Za-z0-9._-]",
+            with: "_",
+            options: .regularExpression
+        )
+        let dbPath = documentsDir.appendingPathComponent("openmls_\(safeUserId).db").path
         provider = try Provider.newWithPath(dbPath: dbPath)
         
         // Auto-restore identity from DB
@@ -391,8 +402,15 @@ class MlsManager {
         identity = id
     }
     
-    /// Logout: clear all MLS data
+    /// Logout: release in-memory state only. Do not delete the DB if the user
+    /// should be able to log in later and resume existing MLS state.
     func logout() throws {
+        groups.removeAll()
+        identity = nil
+    }
+
+    /// Local reset/wipe: permanently delete this user's MLS state from device.
+    func resetLocalMlsState() throws {
         try provider.deleteAllGroups()
         try provider.deleteIdentity()
         groups.removeAll()
@@ -404,11 +422,10 @@ class MlsManager {
 #### Step 2: Use in your app
 
 ```swift
-// === AppDelegate / @main ===
-func application(_ application: UIApplication,
-                 didFinishLaunchingWithOptions ...) -> Bool {
+// === After successful app login ===
+func onLogin(currentUserId: String) {
     do {
-        try MlsManager.shared.initialize()
+        try MlsManager.shared.initialize(userId: currentUserId)
         if MlsManager.shared.identity == nil {
             try MlsManager.shared.createIdentity(userId: currentUserId)
         }
@@ -416,7 +433,6 @@ func application(_ application: UIApplication,
     } catch {
         print("MLS init failed: \(error)")
     }
-    return true
 }
 
 // === ViewController / ViewModel ===
@@ -447,7 +463,7 @@ try mgr.provider.deleteGroup(cid: channelId)
 #### App Lifecycle Flow (iOS)
 
 ```
-App launch ──→ Provider.newWithPath("openmls.db")
+User login ──→ Provider.newWithPath("openmls_{userId}.db")
             │
             ├──→ provider.loadIdentity() → restore from DB (no Keychain needed!)
             │
@@ -483,9 +499,10 @@ class MlsManager private constructor() {
         private set
     val groups = mutableMapOf<String, Group>()
     
-    /// Call once in Application.onCreate()
-    fun initialize(context: Context) {
-        val dbPath = "${context.filesDir}/openmls.db"
+    /// Call after login with the authenticated user id.
+    fun initialize(context: Context, userId: String) {
+        val safeUserId = userId.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val dbPath = "${context.filesDir}/openmls_${safeUserId}.db"
         provider = Provider.newWithPath(dbPath)
         
         // Auto-restore identity from DB
@@ -507,12 +524,21 @@ class MlsManager private constructor() {
         identity = id
     }
     
-    /// Logout: clear all MLS data
+    /// Logout: release in-memory/native handles only. Do not delete the DB if
+    /// this user should be able to log in later and resume existing MLS state.
     fun logout() {
-        provider.deleteAllGroups()
-        provider.deleteIdentity()
+        groups.values.forEach { it.close() }
+        identity?.close()
+        if (::provider.isInitialized) provider.close()
         groups.clear()
         identity = null
+    }
+
+    /// Local reset/wipe: permanently delete this user's MLS state from device.
+    fun resetLocalMlsState() {
+        provider.deleteAllGroups()
+        provider.deleteIdentity()
+        logout()
     }
 }
 ```
@@ -520,17 +546,14 @@ class MlsManager private constructor() {
 #### Step 2: Use in your app
 
 ```kotlin
-// === In Application class ===
-class MyApp : Application() {
-    override fun onCreate() {
-        super.onCreate()
-        val mgr = MlsManager.getInstance()
-        mgr.initialize(this)
-        if (mgr.identity == null) {
-            mgr.createIdentity(currentUserId)
-        }
-        println("Groups restored: ${mgr.groups.size}")
+// === After successful app login ===
+fun onLogin(context: Context, currentUserId: String) {
+    val mgr = MlsManager.getInstance()
+    mgr.initialize(context, currentUserId)
+    if (mgr.identity == null) {
+        mgr.createIdentity(currentUserId)
     }
+    println("Groups restored: ${mgr.groups.size}")
 }
 
 // === In Activity / ViewModel ===
@@ -552,7 +575,7 @@ mgr.provider.deleteGroup(channelId)
 #### App Lifecycle Flow (Android)
 
 ```
-Application.onCreate() ──→ Provider.newWithPath("openmls.db")
+User login ──→ Provider.newWithPath("openmls_{userId}.db")
                         │
                         ├──→ provider.loadIdentity() → restore from DB
                         │
@@ -575,7 +598,8 @@ Application.onCreate() ──→ Provider.newWithPath("openmls.db")
 | **Multi-user** | Each user should have a separate DB: `openmls_{userId}.db` |
 | **Thread safety** | Provider wraps a Mutex, safe to call from multiple threads |
 | **No DB management needed** | OpenMLS auto-creates tables, reads/writes, and runs migrations |
-| **Logout** | Call `deleteAllGroups()` + `deleteIdentity()` to clear all data |
+| **Logout** | Release in-memory objects/native handles only; keep the per-user DB on device |
+| **Reset / wipe** | Call `deleteAllGroups()` + `deleteIdentity()` only when permanently deleting local MLS state |
 
 ---
 
@@ -587,5 +611,5 @@ Application.onCreate() ──→ Provider.newWithPath("openmls.db")
 | `UnsatisfiedLinkError` (Android) | Verify jniLibs are in the correct ABI directory |
 | `Undefined symbol _uniffi_*` | Rebuild: `./build_mobile.sh ios` or `android` |
 | iOS Simulator crash | Make sure to use `aarch64-apple-ios-sim` build for Apple Silicon |
-| `StorageError` when creating Provider | Check write permissions for `db_path`; parent directory must exist |
+| `StorageError` when creating Provider | Check write permissions for `db_path`; parent directory must exist. Call `initLogger()` and inspect Android logcat tag `OpenMLS` for the native SQLite/migration error. |
 | `StorageError` when restoring Identity | Ensure you use the same Provider instance (or same db_path) |

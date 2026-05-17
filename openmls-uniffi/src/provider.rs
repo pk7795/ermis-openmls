@@ -267,6 +267,11 @@ pub struct Provider {
 }
 
 impl Provider {
+    fn storage_error(context: &str, error: impl std::fmt::Display) -> crate::errors::MlsError {
+        crate::mls_error!("{context}: {error}");
+        crate::errors::MlsError::StorageError
+    }
+
     /// Create a new in-memory provider (state lost when app closes).
     pub fn new() -> Self {
         Self {
@@ -276,8 +281,9 @@ impl Provider {
 
     /// Create a new persistent provider backed by a SQLite file at `db_path`.
     pub fn new_with_path(db_path: String) -> Result<Self, crate::errors::MlsError> {
-        let persistent = PersistentCryptoProvider::new_with_path(&db_path)
-            .map_err(|_| crate::errors::MlsError::StorageError)?;
+        let persistent = PersistentCryptoProvider::new_with_path(&db_path).map_err(|e| {
+            Self::storage_error(&format!("Provider.new_with_path({db_path}) failed"), e)
+        })?;
         Ok(Self {
             inner: Mutex::new(persistent),
         })
@@ -291,14 +297,14 @@ impl Provider {
     pub fn stored_group_ids(&self) -> Result<Vec<String>, crate::errors::MlsError> {
         self.lock()
             .stored_group_ids()
-            .map_err(|_| crate::errors::MlsError::StorageError)
+            .map_err(|e| Self::storage_error("Provider.stored_group_ids failed", e))
     }
 
     /// Count the number of groups stored in the database.
     pub fn group_count(&self) -> Result<u32, crate::errors::MlsError> {
         self.lock()
             .group_count()
-            .map_err(|_| crate::errors::MlsError::StorageError)
+            .map_err(|e| Self::storage_error("Provider.group_count failed", e))
     }
 
     /// Delete all data for a specific group by CID.
@@ -306,7 +312,7 @@ impl Provider {
     pub fn delete_group(&self, cid: String) -> Result<(), crate::errors::MlsError> {
         self.lock()
             .delete_group(&cid)
-            .map_err(|_| crate::errors::MlsError::StorageError)
+            .map_err(|e| Self::storage_error(&format!("Provider.delete_group({cid}) failed"), e))
     }
 
     /// Delete all group data from the database.
@@ -314,7 +320,7 @@ impl Provider {
     pub fn delete_all_groups(&self) -> Result<(), crate::errors::MlsError> {
         self.lock()
             .delete_all_groups()
-            .map_err(|_| crate::errors::MlsError::StorageError)
+            .map_err(|e| Self::storage_error("Provider.delete_all_groups failed", e))
     }
 
     // ========================================================================
@@ -330,7 +336,9 @@ impl Provider {
     ) -> Result<(), crate::errors::MlsError> {
         self.lock()
             .store_identity(&user_id, &identity_bytes)
-            .map_err(|_| crate::errors::MlsError::StorageError)
+            .map_err(|e| {
+                Self::storage_error(&format!("Provider.store_identity({user_id}) failed"), e)
+            })
     }
 
     /// Load the stored identity from the database.
@@ -339,7 +347,7 @@ impl Provider {
         self.lock()
             .load_identity()
             .map(|opt| opt.map(|(_, bytes)| bytes))
-            .map_err(|_| crate::errors::MlsError::StorageError)
+            .map_err(|e| Self::storage_error("Provider.load_identity failed", e))
     }
 
     /// Delete the stored identity from the database.
@@ -347,7 +355,7 @@ impl Provider {
     pub fn delete_identity(&self) -> Result<(), crate::errors::MlsError> {
         self.lock()
             .delete_identity()
-            .map_err(|_| crate::errors::MlsError::StorageError)
+            .map_err(|e| Self::storage_error("Provider.delete_identity failed", e))
     }
 
     // ========================================================================
