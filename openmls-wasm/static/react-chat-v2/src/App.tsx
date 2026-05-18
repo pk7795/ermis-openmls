@@ -33,6 +33,7 @@ type LogType = 'info' | 'success' | 'error' | 'warning' | 'proposal' | 'commit';
 function App(): React.ReactElement {
     const [wasmReady, setWasmReady] = useState<boolean>(false);
     const [logs, setLogs] = useState<LogEntry[]>([]);
+    const wasmInitStartedRef = useRef<boolean>(false);
 
     // Dynamic user management
     const [users, setUsers] = useState<Map<string, UserState>>(new Map());
@@ -52,6 +53,8 @@ function App(): React.ReactElement {
     const [groupCreated, setGroupCreated] = useState<boolean>(false);
     const [adminUserId, setAdminUserId] = useState<string | null>(null);
     const [pendingProposals, setPendingProposals] = useState<number>(0);
+    const [pendingGhosts, setPendingGhosts] = useState<Set<string>>(new Set());
+    const pendingGhostsRef = useRef<Set<string>>(pendingGhosts);
     const [exportedGroupInfoPreMerge, setExportedGroupInfoPreMerge] = useState<Uint8Array | null>(null);
     const [exportedRatchetTreePreMerge, setExportedRatchetTreePreMerge] = useState<any | null>(null);
 
@@ -65,6 +68,9 @@ function App(): React.ReactElement {
 
     // Initialize WASM
     useEffect(() => {
+        if (wasmInitStartedRef.current) return;
+        wasmInitStartedRef.current = true;
+
         const initWasm = async () => {
             try {
                 await init();
@@ -103,6 +109,41 @@ function App(): React.ReactElement {
             return newMap;
         });
     }, []);
+
+    const setPendingGhostsAndRef = useCallback((updater: (prev: Set<string>) => Set<string>) => {
+        setPendingGhosts(prev => {
+            const next = updater(prev);
+            pendingGhostsRef.current = next;
+            return next;
+        });
+    }, []);
+
+    const ghostList = useCallback((extraUserIds: string[] = []) => {
+        return Array.from(new Set([...pendingGhostsRef.current, ...extraUserIds]));
+    }, []);
+
+    const cleanupGhosts = useCallback((userIds: string[]) => {
+        if (userIds.length === 0) return;
+        setPendingGhostsAndRef(prev => {
+            const next = new Set(prev);
+            userIds.forEach(uid => next.delete(uid));
+            return next;
+        });
+    }, [setPendingGhostsAndRef]);
+
+    const markGhost = useCallback((userId: string) => {
+        const currentUsers = usersRef.current;
+        const user = currentUsers.get(userId);
+        if (!user?.group || userId === adminUserId) return;
+
+        setPendingGhostsAndRef(prev => {
+            const next = new Set(prev);
+            next.add(userId);
+            return next;
+        });
+        updateUser(userId, prev => ({ ...prev, group: null }));
+        addLog(`☑ Marked ${userId} as pending ghost. Local user state cleared; admin MLS tree still contains the old leaf.`, 'warning');
+    }, [adminUserId, addLog, setPendingGhostsAndRef, updateUser]);
 
     // Helper: Capture Pre/Post Merge Group Infos
     const capturePreMerge = useCallback((group: any, commitBundle: any) => {
@@ -197,29 +238,22 @@ function App(): React.ReactElement {
             const kp = member.identity.key_package(member.provider);
             addLog(`Created key package for ${userId}`, 'info');
 
-            // Step 2: Propose add
-            const proposal = admin.group.propose_add_member(admin.provider, admin.identity, kp);
-            addLog(`📝 Proposal: Add ${userId} (ref: ${proposal.proposal_ref.slice(0, 8).join(',')})`, 'proposal');
+            const bundledGhosts = ghostList([userId]).filter(uid => uid !== adminUserId);
+            const ghostsForLog = bundledGhosts.filter(uid => pendingGhostsRef.current.has(uid));
+            const epochBefore = Number(admin.group.epoch());
 
-            // Step 2.5: Broadcast proposal to existing group members BEFORE commit
-            currentUsers.forEach((u, uid) => {
-                if (uid !== adminUserId && uid !== userId && u.group) {
-                    try {
-                        u.group.process_message(u.provider, proposal.bytes);
-                        addLog(`${uid} received add proposal`, 'info');
-                    } catch (e) {
-                        addLog(`${uid} error processing proposal: ${(e as Error).message}`, 'error');
-                    }
-                }
-            });
-
-            // Step 3: Commit
-            addLog('Committing proposal...', 'commit');
-            const commitBundle = admin.group.commit_pending_proposals(admin.provider, admin.identity);
-            addLog(`✓ Commit created! has_welcome: ${commitBundle.has_welcome()}`, 'commit');
+            addLog(`Composite commit: remove ghosts [${ghostsForLog.join(', ') || 'none'}] + add ${userId}`, 'commit');
+            const commitBundle = admin.group.commit_group_changes(
+                admin.provider,
+                admin.identity,
+                bundledGhosts,
+                [kp],
+                false
+            );
+            addLog(`✓ Composite add commit created! has_welcome: ${commitBundle.has_welcome()}, epoch ${epochBefore} -> ${epochBefore + 1}`, 'commit');
             capturePreMerge(admin.group, commitBundle);
 
-            // Step 4: Broadcast commit to existing group members BEFORE merge
+            // Broadcast commit only. No standalone proposal is delivered in this POC.
             const commitBytes = commitBundle.commit;
             currentUsers.forEach((u, uid) => {
                 if (uid !== adminUserId && uid !== userId && u.group) {
@@ -237,8 +271,9 @@ function App(): React.ReactElement {
             admin.group.merge_pending_commit(admin.provider);
             addLog(`✓ Commit merged! New epoch: ${admin.group.epoch()}`, 'success');
             capturePostMerge(admin.group, admin.provider, admin.identity);
+            cleanupGhosts(bundledGhosts);
 
-            // Step 6: New member joins with Welcome
+            // New member joins with Welcome
             const ratchetTree = admin.group.export_ratchet_tree();
             const welcome = commitBundle.welcome;
 
@@ -282,13 +317,19 @@ function App(): React.ReactElement {
             kps: any[],
             usersToAdd: { userId: string; state: UserState }[]
         ) => {
-            addLog(`Calling add_members() with ${kps.length} KeyPackages...`, 'commit');
-            const commitBundle = admin.group.add_members(
+            const bundledGhosts = ghostList(usersToAdd.map(u => u.userId)).filter(uid => uid !== adminUserId);
+            const ghostsForLog = bundledGhosts.filter(uid => pendingGhostsRef.current.has(uid));
+            const epochBefore = Number(admin.group.epoch());
+
+            addLog(`Composite commit: remove ghosts [${ghostsForLog.join(', ') || 'none'}] + add ${usersToAdd.map(u => u.userId).join(', ')}`, 'commit');
+            const commitBundle = admin.group.commit_group_changes(
                 admin.provider,
                 admin.identity,
-                kps
+                bundledGhosts,
+                kps,
+                false
             );
-            addLog(`✓ Single commit! has_welcome: ${commitBundle.has_welcome()}, ${commitBundle.commit.length} bytes`, 'commit');
+            addLog(`✓ Single composite commit! has_welcome: ${commitBundle.has_welcome()}, ${commitBundle.commit.length} bytes, epoch ${epochBefore} -> ${epochBefore + 1}`, 'commit');
             capturePreMerge(admin.group, commitBundle);
 
             // Broadcast commit to existing group members BEFORE merge
@@ -309,6 +350,7 @@ function App(): React.ReactElement {
             admin.group.merge_pending_commit(admin.provider);
             addLog(`✓ Commit merged! New epoch: ${admin.group.epoch()}`, 'success');
             capturePostMerge(admin.group, admin.provider, admin.identity);
+            cleanupGhosts(bundledGhosts);
 
             // Export ratchet tree + welcome for new members
             const ratchetTree = admin.group.export_ratchet_tree();
@@ -403,7 +445,7 @@ function App(): React.ReactElement {
         } catch (error) {
             addLog(`Error in add members flow: ${(error as Error).message}`, 'error');
         }
-    }, [adminUserId, updateUser, addLog, capturePreMerge, capturePostMerge]);
+    }, [adminUserId, updateUser, addLog, capturePreMerge, capturePostMerge, ghostList, cleanupGhosts]);
 
     // Remove member by user_id (Direct Commit — proposals inline)
     const removeMember = useCallback((userIdToRemove: string) => {
@@ -415,29 +457,40 @@ function App(): React.ReactElement {
         try {
             addLog(`=== Remove Member: ${userIdToRemove} ===`, 'info');
 
-            // Step 1: Direct Commit — remove_user() creates commit with inline remove proposals
-            const commitBundle = admin.group.remove_user(
+            const bundledRemovals = ghostList([userIdToRemove]).filter(uid => uid !== adminUserId);
+            const ghostsForLog = bundledRemovals.filter(uid => uid !== userIdToRemove && pendingGhostsRef.current.has(uid));
+            const epochBefore = Number(admin.group.epoch());
+
+            addLog(`Composite commit: remove target ${userIdToRemove} + ghosts [${ghostsForLog.join(', ') || 'none'}]`, 'commit');
+            const commitBundle = admin.group.commit_group_changes(
                 admin.provider,
                 admin.identity,
-                userIdToRemove
+                bundledRemovals,
+                [],
+                false
             );
+            addLog(`✓ Composite remove commit created! has_welcome: ${commitBundle.has_welcome()}, epoch ${epochBefore} -> ${epochBefore + 1}`, 'commit');
             capturePreMerge(admin.group, commitBundle);
 
             admin.group.merge_pending_commit(admin.provider);
-            addLog(`✓ Member removed! New epoch: ${admin.group.epoch()}`, 'success');
+            addLog(`✓ Composite remove merged! epoch ${epochBefore} -> ${admin.group.epoch()}`, 'success');
             capturePostMerge(admin.group, admin.provider, admin.identity);
+            cleanupGhosts(bundledRemovals);
 
             // Step 2: Broadcast commit to remaining members
+            let processedReceivers = 0;
             currentUsers.forEach((u, uid) => {
                 if (uid !== adminUserId && uid !== userIdToRemove && u.group) {
                     try {
                         u.group.process_message(u.provider, commitBundle.commit);
+                        processedReceivers += 1;
                         addLog(`${uid} processed remove commit (new epoch: ${u.group.epoch()})`, 'info');
                     } catch (e) {
                         addLog(`${uid} error processing commit: ${(e as Error).message}`, 'error');
                     }
                 }
             });
+            addLog(`Active receivers processed remove commit: ${processedReceivers}`, 'success');
 
             // Clear removed user's group
             updateUser(userIdToRemove, prev => ({ ...prev, group: null }));
@@ -450,7 +503,7 @@ function App(): React.ReactElement {
         } catch (error) {
             addLog(`Error removing member: ${(error as Error).message}`, 'error');
         }
-    }, [adminUserId, updateUser, addLog, capturePreMerge, capturePostMerge]);
+    }, [adminUserId, updateUser, addLog, capturePreMerge, capturePostMerge, ghostList, cleanupGhosts]);
 
     // Self update (key rotation)
     const performKeyRotation = useCallback((userKey: string) => {
@@ -461,22 +514,36 @@ function App(): React.ReactElement {
         try {
             addLog(`=== Key Rotation: ${userKey} ===`, 'info');
 
-            const commitBundle = user.group.self_update(user.provider, user.identity);
-            addLog(`✓ Self-update commit created`, 'commit');
+            const bundledGhosts = ghostList().filter(uid => uid !== userKey);
+            const epochBefore = Number(user.group.epoch());
+
+            addLog(`Composite commit: remove ghosts [${bundledGhosts.join(', ') || 'none'}] + self_update ${userKey}`, 'commit');
+            const commitBundle = user.group.commit_group_changes(
+                user.provider,
+                user.identity,
+                bundledGhosts,
+                [],
+                true
+            );
+            addLog(`✓ Composite self-update commit created! has_welcome: ${commitBundle.has_welcome()}, epoch ${epochBefore} -> ${epochBefore + 1}`, 'commit');
             capturePreMerge(user.group, commitBundle);
 
             user.group.merge_pending_commit(user.provider);
-            addLog(`✓ Keys rotated! New epoch: ${user.group.epoch()}`, 'success');
+            addLog(`✓ Keys rotated! epoch ${epochBefore} -> ${user.group.epoch()}`, 'success');
             capturePostMerge(user.group, user.provider, user.identity);
+            cleanupGhosts(bundledGhosts);
 
             updateUser(userKey, prev => ({ ...prev, group: prev.group }));
 
             // Broadcast commit to other members
             const commit = commitBundle.commit;
+            let processedReceivers = 0;
             currentUsers.forEach((u, uid) => {
                 if (uid !== userKey && u.group) {
                     try {
                         u.group.process_message(u.provider, commit);
+                        processedReceivers += 1;
+                        addLog(`${uid} processed self-update commit (epoch: ${u.group.epoch()})`, 'info');
                         updateUser(uid, prev => ({ ...prev, group: prev.group }));
                     } catch (e) {
                         addLog(`${uid} error: ${(e as Error).message}`, 'error');
@@ -484,12 +551,12 @@ function App(): React.ReactElement {
                 }
             });
 
-            addLog(`All members synced to epoch ${user.group.epoch()}`, 'success');
+            addLog(`Active receivers processed self-update commit: ${processedReceivers}`, 'success');
 
         } catch (error) {
             addLog(`Error in key rotation: ${(error as Error).message}`, 'error');
         }
-    }, [updateUser, addLog, capturePreMerge, capturePostMerge]);
+    }, [updateUser, addLog, capturePreMerge, capturePostMerge, ghostList, cleanupGhosts]);
 
     // External Join
     const performExternalJoin = useCallback((userIdToJoin: string, type: 'pre' | 'post') => {
@@ -770,6 +837,11 @@ function App(): React.ReactElement {
                         Pending Proposals: {pendingProposals}
                     </div>
                 )}
+                {pendingGhosts.size > 0 && (
+                    <div className="badge badge-warning" style={{ marginTop: '12px', marginLeft: '8px' }}>
+                        Pending Ghosts: {Array.from(pendingGhosts).join(', ')}
+                    </div>
+                )}
             </div>
 
             {/* Chat Panels - Dynamic */}
@@ -787,6 +859,7 @@ function App(): React.ReactElement {
                             onSendMessage={handleSendMessage}
                             onAddMember={(groupCreated && adminUserId && !user?.group && uid !== adminUserId && users.get(adminUserId)?.group) ? addMemberToGroup : undefined}
                             onRemoveMember={(groupCreated && adminUserId && user?.group && uid !== adminUserId && users.get(adminUserId)?.group) ? removeMember : undefined}
+                            onMarkGhost={(groupCreated && adminUserId && user?.group && uid !== adminUserId && users.get(adminUserId)?.group) ? markGhost : undefined}
                             onExternalJoinPre={(exportedGroupInfoPreMerge && !user?.group && uid !== adminUserId) ? () => performExternalJoin(uid, 'pre') : undefined}
                             onExternalJoinPost={(exportedGroupInfoPostMerge && !user?.group && uid !== adminUserId) ? () => performExternalJoin(uid, 'post') : undefined}
                             onKeyRotate={user?.group ? performKeyRotation : undefined}

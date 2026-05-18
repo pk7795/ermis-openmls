@@ -69,6 +69,60 @@ fn create_group_alice_and_bob() -> (
     )
 }
 
+fn create_group_alice_bob_dave() -> (
+    Arc<Provider>,
+    Arc<Identity>,
+    Arc<Group>,
+    Arc<Provider>,
+    Arc<Group>,
+) {
+    let alice_provider = create_provider();
+    let bob_provider = create_provider();
+    let dave_provider = create_provider();
+
+    let alice = create_identity(alice_provider.clone(), "alice");
+    let bob = create_identity(bob_provider.clone(), "bob");
+    let dave = create_identity(dave_provider.clone(), "dave");
+
+    let alice_group = Arc::new(
+        Group::create_with_cid(
+            alice_provider.clone(),
+            alice.clone(),
+            "team:wrapper_test".into(),
+        )
+        .unwrap(),
+    );
+
+    let add_result = alice_group
+        .add_members(
+            alice_provider.clone(),
+            alice.clone(),
+            vec![
+                bob.key_package(bob_provider),
+                dave.key_package(dave_provider.clone()),
+            ],
+        )
+        .unwrap();
+
+    alice_group
+        .merge_pending_commit(alice_provider.clone())
+        .unwrap();
+
+    let ratchet_tree = alice_group.export_ratchet_tree();
+    let welcome = add_result.welcome.expect("Should have welcome");
+    let dave_group = Arc::new(
+        Group::join_with_welcome(dave_provider.clone(), welcome, Some(ratchet_tree)).unwrap(),
+    );
+
+    (
+        alice_provider,
+        alice,
+        alice_group,
+        dave_provider,
+        dave_group,
+    )
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -211,6 +265,113 @@ fn test_proposal_commit_separation() {
 
     let members = group.members();
     assert_eq!(members.len(), 3); // alice, bob, charlie
+}
+
+#[test]
+fn test_commit_group_changes_processes_without_standalone_proposals() {
+    let (alice_provider, alice, alice_group, dave_provider, dave_group) =
+        create_group_alice_bob_dave();
+    let charlie_provider = create_provider();
+    let charlie = create_identity(charlie_provider.clone(), "charlie");
+
+    let epoch_before = alice_group.epoch();
+    let composite = alice_group
+        .commit_group_changes(
+            alice_provider.clone(),
+            alice.clone(),
+            vec!["bob".to_string()],
+            vec![charlie.key_package(charlie_provider)],
+            false,
+        )
+        .unwrap();
+    assert!(composite.welcome.is_some());
+
+    dave_group
+        .process_message(dave_provider.clone(), composite.commit)
+        .unwrap();
+    alice_group.merge_pending_commit(alice_provider).unwrap();
+
+    assert_eq!(alice_group.epoch(), epoch_before + 1);
+    assert!(alice_group.member_by_user_id("bob".into()).is_none());
+    assert!(alice_group.member_by_user_id("charlie".into()).is_some());
+    assert!(dave_group.member_by_user_id("bob".into()).is_none());
+    assert!(dave_group.member_by_user_id("charlie".into()).is_some());
+}
+
+#[test]
+fn test_commit_member_add_with_removals_wrapper() {
+    let (alice_provider, alice, alice_group, dave_provider, dave_group) =
+        create_group_alice_bob_dave();
+    let charlie_provider = create_provider();
+    let charlie = create_identity(charlie_provider.clone(), "charlie");
+
+    let epoch_before = alice_group.epoch();
+    let composite = alice_group
+        .commit_member_add_with_removals(
+            alice_provider.clone(),
+            alice.clone(),
+            vec!["bob".to_string()],
+            vec![charlie.key_package(charlie_provider)],
+        )
+        .unwrap();
+    assert!(composite.welcome.is_some());
+
+    dave_group
+        .process_message(dave_provider.clone(), composite.commit)
+        .unwrap();
+    alice_group.merge_pending_commit(alice_provider).unwrap();
+
+    assert_eq!(alice_group.epoch(), epoch_before + 1);
+    assert!(alice_group.member_by_user_id("bob".into()).is_none());
+    assert!(alice_group.member_by_user_id("charlie".into()).is_some());
+    assert!(dave_group.member_by_user_id("bob".into()).is_none());
+    assert!(dave_group.member_by_user_id("charlie".into()).is_some());
+}
+
+#[test]
+fn test_commit_self_update_with_removals_wrapper() {
+    let (alice_provider, alice, alice_group, dave_provider, dave_group) =
+        create_group_alice_bob_dave();
+
+    let epoch_before = alice_group.epoch();
+    let composite = alice_group
+        .commit_self_update_with_removals(
+            alice_provider.clone(),
+            alice.clone(),
+            vec!["bob".to_string()],
+        )
+        .unwrap();
+    assert!(composite.welcome.is_none());
+
+    dave_group
+        .process_message(dave_provider.clone(), composite.commit)
+        .unwrap();
+    alice_group.merge_pending_commit(alice_provider).unwrap();
+
+    assert_eq!(alice_group.epoch(), epoch_before + 1);
+    assert!(alice_group.member_by_user_id("bob".into()).is_none());
+    assert!(dave_group.member_by_user_id("bob".into()).is_none());
+}
+
+#[test]
+fn test_commit_member_removals_wrapper() {
+    let (alice_provider, alice, alice_group, dave_provider, dave_group) =
+        create_group_alice_bob_dave();
+
+    let epoch_before = alice_group.epoch();
+    let composite = alice_group
+        .commit_member_removals(alice_provider.clone(), alice.clone(), vec!["bob".to_string()])
+        .unwrap();
+    assert!(composite.welcome.is_none());
+
+    dave_group
+        .process_message(dave_provider.clone(), composite.commit)
+        .unwrap();
+    alice_group.merge_pending_commit(alice_provider).unwrap();
+
+    assert_eq!(alice_group.epoch(), epoch_before + 1);
+    assert!(alice_group.member_by_user_id("bob".into()).is_none());
+    assert!(dave_group.member_by_user_id("bob".into()).is_none());
 }
 
 #[test]

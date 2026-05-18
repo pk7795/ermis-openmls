@@ -83,6 +83,7 @@ export interface ChatPanelProps {
     onSendMessage: (senderId: string, text: string, options?: SendMessageOptions) => void;
     onAddMember?: (userId: string) => void;
     onRemoveMember?: (userId: string) => void;
+    onMarkGhost?: (userId: string) => void;
     onExternalJoinPre?: (userId: string) => void;
     onExternalJoinPost?: (userId: string) => void;
     onKeyRotate?: (userId: string) => void;

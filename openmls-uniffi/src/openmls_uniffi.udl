@@ -138,6 +138,9 @@ interface Group {
     void save_state(Provider provider);
 
     [Throws=MlsError]
+    void delete_state(Provider provider);
+
+    [Throws=MlsError]
     string cid();
     bytes group_id();
     u64 epoch();
@@ -218,6 +221,37 @@ interface Group {
 
     [Throws=MlsError]
     CommitBundle remove_users(Provider provider, Identity sender, sequence<string> user_ids);
+
+    [Throws=MlsError]
+    CommitBundle commit_group_changes(
+        Provider provider,
+        Identity sender,
+        sequence<string> remove_user_ids,
+        sequence<KeyPackage> add_members,
+        boolean force_self_update
+    );
+
+    [Throws=MlsError]
+    CommitBundle commit_member_add_with_removals(
+        Provider provider,
+        Identity sender,
+        sequence<string> remove_user_ids,
+        sequence<KeyPackage> add_members
+    );
+
+    [Throws=MlsError]
+    CommitBundle commit_self_update_with_removals(
+        Provider provider,
+        Identity sender,
+        sequence<string> remove_user_ids
+    );
+
+    [Throws=MlsError]
+    CommitBundle commit_member_removals(
+        Provider provider,
+        Identity sender,
+        sequence<string> remove_user_ids
+    );
 
     [Throws=MlsError]
     sequence<ProposalMessage> propose_remove_user(Provider provider, Identity sender, string user_id);

@@ -155,6 +155,36 @@ let updateResult = try group.selfUpdate(
     sender: alice
 )
 try group.mergePendingCommit(provider: aliceProvider)
+
+// Composite inline commit: remove stale MLS ghosts and add Bob in one epoch
+// Use this when the app has pending self-leave/removal tombstones to clean up.
+let compositeAdd = try group.commitMemberAddWithRemovals(
+    provider: aliceProvider,
+    sender: alice,
+    removeUserIds: ["old_member_id"],
+    addMembers: [bobKp]
+)
+try group.mergePendingCommit(provider: aliceProvider)
+
+// Composite key rotation: remove stale ghosts and rotate sender leaf in one epoch
+let compositeRotate = try group.commitSelfUpdateWithRemovals(
+    provider: aliceProvider,
+    sender: alice,
+    removeUserIds: ["old_member_id"]
+)
+try group.mergePendingCommit(provider: aliceProvider)
+
+// Composite removals: remove target members and stale ghosts in one epoch
+let compositeRemove = try group.commitMemberRemovals(
+    provider: aliceProvider,
+    sender: alice,
+    removeUserIds: ["bob", "old_member_id"]
+)
+try group.mergePendingCommit(provider: aliceProvider)
+
+// After self-leave/removal cleanup, delete this group's persisted MLS state.
+// A later re-add to the same CID must join from a fresh Welcome.
+try group.deleteState(provider: aliceProvider)
 ```
 
 ---
@@ -240,7 +270,7 @@ cargo test -p openmls-uniffi test_encrypted_messaging
 cargo test -p openmls-uniffi -- --nocapture
 ```
 
-**19 test cases included:**
+**23 test cases included:**
 
 | Test | Verifies |
 |---|---|
@@ -253,6 +283,10 @@ cargo test -p openmls-uniffi -- --nocapture
 | `test_encrypted_messaging` | Encrypt/decrypt messages |
 | `test_encrypted_messaging_with_aad` | Encrypt with AAD metadata |
 | `test_proposal_commit_separation` | Proposal → Commit workflow |
+| `test_commit_group_changes_processes_without_standalone_proposals` | Composite inline remove + add commit processes without standalone proposals |
+| `test_commit_member_add_with_removals_wrapper` | Wrapper for ghost removals + add members |
+| `test_commit_self_update_with_removals_wrapper` | Wrapper for ghost removals + key rotation |
+| `test_commit_member_removals_wrapper` | Wrapper for target removals + ghost removals |
 | `test_member_info` | Query member information |
 | `test_group_state` | Check group state |
 | `test_ratchet_tree_serialization` | Serialize/deserialize RatchetTree |
@@ -353,6 +387,10 @@ class OpenMlsTests: XCTestCase {
 | `Group.createWithCid(provider, founder, cid)` | Create a new group |
 | `Group.joinWithWelcome(provider, welcome, ratchetTree)` | Join via welcome message |
 | `Group.loadFromStorage(provider, cid)` | **Load existing group from DB** |
+| `group.deleteState(provider)` | Delete this group's persisted OpenMLS state after local leave/removal cleanup |
+| `group.commitMemberAddWithRemovals(provider, sender, removeUserIds, addMembers)` | Remove stale members and add new members in one inline commit |
+| `group.commitSelfUpdateWithRemovals(provider, sender, removeUserIds)` | Remove stale members and rotate sender leaf in one inline commit |
+| `group.commitMemberRemovals(provider, sender, removeUserIds)` | Remove target/stale members in one inline commit |
 
 ---
 

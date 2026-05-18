@@ -128,6 +128,17 @@ impl Group {
             .map_err(|e| JsError::new(&format!("Failed to save group state: {e}")))
     }
 
+    /// Delete this group's persisted OpenMLS state from the Provider storage.
+    ///
+    /// Use when the local user leaves or is removed from a channel. This clears
+    /// the old MLS group state so a later re-add with the same CID can join from
+    /// a fresh Welcome without colliding with stale provider records.
+    pub fn delete_state(&mut self, provider: &Provider) -> Result<(), JsError> {
+        self.mls_group
+            .delete(provider.0.storage())
+            .map_err(|e| JsError::new(&format!("Failed to delete group state: {e}")))
+    }
+
     /// Create a new group (legacy API, uses group_id string directly)
     pub fn create_new(provider: &Provider, founder: &Identity, group_id: &str) -> Group {
         Self::create_with_cid(provider, founder, group_id).unwrap()

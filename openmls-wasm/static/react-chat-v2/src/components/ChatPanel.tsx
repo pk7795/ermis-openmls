@@ -11,6 +11,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
     epoch,
     onAddMember,
     onRemoveMember,
+    onMarkGhost,
     onExternalJoinPre,
     onExternalJoinPost,
     onKeyRotate
@@ -59,6 +60,15 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                                 onClick={() => onRemoveMember(userId)}
                             >
                                 Remove
+                            </button>
+                        )}
+                        {onMarkGhost && (
+                            <button
+                                className="btn btn-warning"
+                                style={{ padding: '4px 8px', fontSize: '12px' }}
+                                onClick={() => onMarkGhost(userId)}
+                            >
+                                Mark Ghost
                             </button>
                         )}
                         {onExternalJoinPre && (

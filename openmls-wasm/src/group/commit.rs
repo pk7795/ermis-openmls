@@ -1,5 +1,7 @@
 //! Commit APIs for finalizing proposals
 
+use std::collections::HashSet;
+
 use js_sys::Uint8Array;
 use openmls::framing::MlsMessageOut;
 use openmls::messages::group_info::GroupInfo;
@@ -301,6 +303,125 @@ impl Group {
         }
 
         self.remove_members(provider, sender, &member_indices)
+    }
+
+    /// Create one inline commit containing removals, adds, and/or a self-update.
+    ///
+    /// This API uses `commit_builder().consume_proposal_store(false)` so the
+    /// resulting commit contains only the changes requested by this call. The
+    /// remove/add proposals are owned by the commit and encoded by value, which
+    /// avoids receivers depending on standalone proposal messages being delivered
+    /// before the commit.
+    pub fn commit_group_changes(
+        &mut self,
+        provider: &Provider,
+        sender: &Identity,
+        remove_user_ids: Vec<String>,
+        add_members: Vec<KeyPackage>,
+        force_self_update: bool,
+    ) -> Result<CommitBundle, JsError> {
+        if self.mls_group.pending_commit().is_some() {
+            self.mls_group
+                .clear_pending_commit(provider.0.storage())
+                .map_err(|e| JsError::new(&format!("Failed to clear pending commit: {e}")))?;
+        }
+
+        let own_leaf_index = self.mls_group.own_leaf_index().u32();
+        let mut remove_indices: Vec<u32> = Vec::new();
+
+        for user_id in &remove_user_ids {
+            for member in self.members_by_user_id(user_id) {
+                if member.index() == own_leaf_index {
+                    return Err(JsError::new(
+                        "commit_group_changes cannot remove the sender's own leaf",
+                    ));
+                }
+                remove_indices.push(member.index());
+            }
+        }
+
+        remove_indices.sort_unstable();
+        remove_indices.dedup();
+
+        let removed_index_set: HashSet<u32> = remove_indices.iter().copied().collect();
+        let existing_sig_keys: HashSet<Vec<u8>> = self
+            .mls_group
+            .members()
+            .filter(|member| !removed_index_set.contains(&member.index.u32()))
+            .map(|member| member.signature_key.clone())
+            .collect();
+
+        let key_packages: Vec<_> = add_members
+            .iter()
+            .filter(|kp| {
+                let sig_key = kp.0.leaf_node().signature_key().as_slice().to_vec();
+                !existing_sig_keys.contains(&sig_key)
+            })
+            .map(|kp| kp.0.clone())
+            .collect();
+
+        if remove_indices.is_empty() && key_packages.is_empty() && !force_self_update {
+            return Err(JsError::new(
+                "commit_group_changes requires at least one remove, add, or self-update operation",
+            ));
+        }
+
+        let leaf_indices = remove_indices.into_iter().map(LeafNodeIndex::new);
+        let commit_bundle = self
+            .mls_group
+            .commit_builder()
+            .consume_proposal_store(false)
+            .propose_removals(leaf_indices)
+            .propose_adds(key_packages)
+            .force_self_update(force_self_update)
+            .load_psks(provider.0.storage())?
+            .build(provider.0.rand(), provider.0.crypto(), &sender.keypair, |_| true)?
+            .stage_commit(provider.as_ref())?;
+
+        let (commit_msg, welcome, group_info) = commit_bundle.into_contents();
+        let welcome_msg = welcome
+            .map(|w| MlsMessageOut::from_welcome(w, openmls::prelude::ProtocolVersion::Mls10));
+
+        Ok(CommitBundle::from_remove_tuple(
+            commit_msg,
+            welcome_msg,
+            group_info,
+        ))
+    }
+
+    /// Create one inline commit that removes stale members and adds new members.
+    ///
+    /// This is an intent-specific wrapper for SDK callsites. It intentionally
+    /// shares the implementation of `commit_group_changes` so duplicate
+    /// add/remove validation cannot drift.
+    pub fn commit_member_add_with_removals(
+        &mut self,
+        provider: &Provider,
+        sender: &Identity,
+        remove_user_ids: Vec<String>,
+        add_members: Vec<KeyPackage>,
+    ) -> Result<CommitBundle, JsError> {
+        self.commit_group_changes(provider, sender, remove_user_ids, add_members, false)
+    }
+
+    /// Create one inline commit that removes stale members and rotates the sender leaf.
+    pub fn commit_self_update_with_removals(
+        &mut self,
+        provider: &Provider,
+        sender: &Identity,
+        remove_user_ids: Vec<String>,
+    ) -> Result<CommitBundle, JsError> {
+        self.commit_group_changes(provider, sender, remove_user_ids, vec![], true)
+    }
+
+    /// Create one inline commit that removes one or more members.
+    pub fn commit_member_removals(
+        &mut self,
+        provider: &Provider,
+        sender: &Identity,
+        remove_user_ids: Vec<String>,
+    ) -> Result<CommitBundle, JsError> {
+        self.commit_group_changes(provider, sender, remove_user_ids, vec![], false)
     }
 
     /// Key rotation with immediate commit (convenience method)

@@ -3,7 +3,10 @@
 //! Ported from openmls-wasm/src/group/ — combines mod.rs, commit.rs, messaging.rs,
 //! proposal.rs, and state.rs into a single file for the UniFFI crate.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 use openmls::{
     credentials::BasicCredential,
@@ -95,6 +98,20 @@ impl Group {
         group
             .store(prov_guard.storage())
             .map_err(|_| MlsError::StorageError)
+    }
+
+    /// Delete this group's persisted OpenMLS state from the Provider storage.
+    ///
+    /// Use when the local user leaves or is removed from a channel. This clears
+    /// stale group state so a later re-add with the same CID can join from a
+    /// fresh Welcome without colliding with old provider records.
+    pub fn delete_state(&self, provider: Arc<Provider>) -> Result<(), MlsError> {
+        let mut group = self.mls_group.lock().unwrap();
+        let prov_guard = provider.lock();
+        group.delete(prov_guard.storage()).map_err(|e| {
+            mls_error!("[MLS] delete_state FAILED: {:?}", e);
+            MlsError::StorageError
+        })
     }
 
     /// Join a group using a Welcome message
@@ -951,6 +968,133 @@ impl Group {
         }
 
         self.remove_members(provider, sender, member_indices)
+    }
+
+    /// Create one inline commit containing removals, adds, and/or a self-update.
+    ///
+    /// Uses commit_builder().consume_proposal_store(false) so remove/add
+    /// proposals are encoded by value inside the commit. Receivers only need the
+    /// commit message; no standalone proposal delivery is required.
+    pub fn commit_group_changes(
+        &self,
+        provider: Arc<Provider>,
+        sender: Arc<Identity>,
+        remove_user_ids: Vec<String>,
+        add_members: Vec<Arc<KeyPackage>>,
+        force_self_update: bool,
+    ) -> Result<CommitBundle, MlsError> {
+        let mut group = self.mls_group.lock().unwrap();
+        let prov_guard = provider.lock();
+
+        if group.pending_commit().is_some() {
+            mls_debug!("[MLS] commit_group_changes: clearing stale pending commit");
+            group.clear_pending_commit(prov_guard.storage()).map_err(|e| {
+                mls_error!("[MLS] commit_group_changes: clear_pending_commit FAILED: {:?}", e);
+                MlsError::InternalError
+            })?;
+        }
+
+        let own_leaf_index = group.own_leaf_index().u32();
+        let mut remove_indices: Vec<u32> = Vec::new();
+
+        for user_id in &remove_user_ids {
+            for member in group.members() {
+                let member_user_id =
+                    String::from_utf8_lossy(member.credential.serialized_content()).to_string();
+                if &member_user_id != user_id {
+                    continue;
+                }
+                if member.index.u32() == own_leaf_index {
+                    mls_error!("[MLS] commit_group_changes: attempted to remove own leaf");
+                    return Err(MlsError::InvalidState);
+                }
+                remove_indices.push(member.index.u32());
+            }
+        }
+
+        remove_indices.sort_unstable();
+        remove_indices.dedup();
+
+        let removed_index_set: HashSet<u32> = remove_indices.iter().copied().collect();
+        let existing_sig_keys: HashSet<Vec<u8>> = group
+            .members()
+            .filter(|member| !removed_index_set.contains(&member.index.u32()))
+            .map(|member| member.signature_key.clone())
+            .collect();
+
+        let key_packages: Vec<_> = add_members
+            .iter()
+            .filter(|kp| {
+                let sig_key = kp.inner.leaf_node().signature_key().as_slice().to_vec();
+                !existing_sig_keys.contains(&sig_key)
+            })
+            .map(|kp| kp.inner.clone())
+            .collect();
+
+        if remove_indices.is_empty() && key_packages.is_empty() && !force_self_update {
+            mls_debug!("[MLS] commit_group_changes: no valid operation");
+            return Err(MlsError::InvalidState);
+        }
+
+        let leaf_indices = remove_indices.into_iter().map(LeafNodeIndex::new);
+        let commit_bundle = group
+            .commit_builder()
+            .consume_proposal_store(false)
+            .propose_removals(leaf_indices)
+            .propose_adds(key_packages)
+            .force_self_update(force_self_update)
+            .load_psks(prov_guard.storage())
+            .map_err(|e| {
+                mls_error!("[MLS] commit_group_changes: load_psks FAILED: {:?}", e);
+                MlsError::InternalError
+            })?
+            .build(prov_guard.rand(), prov_guard.crypto(), &sender.keypair, |_| true)
+            .map_err(|e| {
+                mls_error!("[MLS] commit_group_changes: build FAILED: {:?}", e);
+                MlsError::InternalError
+            })?
+            .stage_commit(&*prov_guard)
+            .map_err(|e| {
+                mls_error!("[MLS] commit_group_changes: stage_commit FAILED: {:?}", e);
+                MlsError::InternalError
+            })?;
+
+        let (commit_msg, welcome, group_info) = commit_bundle.into_contents();
+        let welcome_msg = welcome
+            .map(|w| MlsMessageOut::from_welcome(w, openmls::prelude::ProtocolVersion::Mls10));
+
+        serialize_commit_bundle(&commit_msg, welcome_msg.as_ref(), group_info)
+    }
+
+    /// Create one inline commit that removes stale members and adds new members.
+    pub fn commit_member_add_with_removals(
+        &self,
+        provider: Arc<Provider>,
+        sender: Arc<Identity>,
+        remove_user_ids: Vec<String>,
+        add_members: Vec<Arc<KeyPackage>>,
+    ) -> Result<CommitBundle, MlsError> {
+        self.commit_group_changes(provider, sender, remove_user_ids, add_members, false)
+    }
+
+    /// Create one inline commit that removes stale members and rotates the sender leaf.
+    pub fn commit_self_update_with_removals(
+        &self,
+        provider: Arc<Provider>,
+        sender: Arc<Identity>,
+        remove_user_ids: Vec<String>,
+    ) -> Result<CommitBundle, MlsError> {
+        self.commit_group_changes(provider, sender, remove_user_ids, vec![], true)
+    }
+
+    /// Create one inline commit that removes one or more members.
+    pub fn commit_member_removals(
+        &self,
+        provider: Arc<Provider>,
+        sender: Arc<Identity>,
+        remove_user_ids: Vec<String>,
+    ) -> Result<CommitBundle, MlsError> {
+        self.commit_group_changes(provider, sender, remove_user_ids, vec![], false)
     }
 
     /// Key rotation with immediate commit

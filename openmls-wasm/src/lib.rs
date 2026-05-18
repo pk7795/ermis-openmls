@@ -87,7 +87,9 @@ impl Provider {
     /// Use `Provider.from_bytes()` to restore.
     pub fn to_bytes(&self) -> Result<Vec<u8>, JsError> {
         let mut buf = Vec::new();
-        self.0.storage().serialize(&mut buf)
+        self.0
+            .storage()
+            .serialize(&mut buf)
             .map_err(|e| JsError::new(&format!("Failed to serialize Provider: {}", e)))?;
         Ok(buf)
     }
@@ -97,10 +99,9 @@ impl Provider {
     /// The crypto provider (RNG) is always fresh; only the key store
     /// (private keys, group state, etc.) is restored from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Provider, JsError> {
-        let storage = openmls_rust_crypto::MemoryStorage::deserialize(
-            &mut std::io::Cursor::new(bytes),
-        )
-        .map_err(|e| JsError::new(&format!("Failed to deserialize Provider: {}", e)))?;
+        let storage =
+            openmls_rust_crypto::MemoryStorage::deserialize(&mut std::io::Cursor::new(bytes))
+                .map_err(|e| JsError::new(&format!("Failed to deserialize Provider: {}", e)))?;
 
         Ok(Provider(OpenMlsRustCrypto::new_with_storage(storage)))
     }
@@ -212,6 +213,46 @@ mod tests {
         )
     }
 
+    fn create_group_alice_bob_dave() -> (Provider, Identity, Group, Provider, Group) {
+        let mut alice_provider = Provider::new();
+        let bob_provider = Provider::new();
+        let dave_provider = Provider::new();
+
+        let alice = Identity::new(&alice_provider, "alice").unwrap();
+        let bob = Identity::new(&bob_provider, "bob").unwrap();
+        let dave = Identity::new(&dave_provider, "dave").unwrap();
+
+        let mut alice_group =
+            Group::create_with_cid(&alice_provider, &alice, "team:wrapper_test").unwrap();
+
+        let add_result = alice_group
+            .add_members(
+                &alice_provider,
+                &alice,
+                vec![
+                    bob.key_package(&bob_provider),
+                    dave.key_package(&dave_provider),
+                ],
+            )
+            .unwrap();
+        alice_group
+            .merge_pending_commit(&mut alice_provider)
+            .unwrap();
+
+        let ratchet_tree = alice_group.export_ratchet_tree();
+        let welcome = add_result.welcome().expect("Should have welcome");
+        let dave_group =
+            Group::join_with_welcome(&dave_provider, &welcome, Some(ratchet_tree)).unwrap();
+
+        (
+            alice_provider,
+            alice,
+            alice_group,
+            dave_provider,
+            dave_group,
+        )
+    }
+
     #[test]
     fn test_cid_roundtrip() {
         let provider = Provider::new();
@@ -299,6 +340,152 @@ mod tests {
     }
 
     #[test]
+    fn test_commit_group_changes_processes_without_standalone_proposals() {
+        let mut alice_provider = Provider::new();
+        let bob_provider = Provider::new();
+        let mut dave_provider = Provider::new();
+        let charlie_provider = Provider::new();
+
+        let alice = Identity::new(&alice_provider, "alice").unwrap();
+        let bob = Identity::new(&bob_provider, "bob").unwrap();
+        let dave = Identity::new(&dave_provider, "dave").unwrap();
+        let charlie = Identity::new(&charlie_provider, "charlie").unwrap();
+
+        let mut alice_group =
+            Group::create_with_cid(&alice_provider, &alice, "team:composite").unwrap();
+
+        let initial_add = alice_group
+            .add_members(
+                &alice_provider,
+                &alice,
+                vec![
+                    bob.key_package(&bob_provider),
+                    dave.key_package(&dave_provider),
+                ],
+            )
+            .unwrap();
+        alice_group
+            .merge_pending_commit(&mut alice_provider)
+            .unwrap();
+
+        let ratchet_tree = alice_group.export_ratchet_tree();
+        let welcome = initial_add
+            .welcome()
+            .expect("initial add should have welcome");
+        let mut dave_group =
+            Group::join_with_welcome(&dave_provider, &welcome, Some(ratchet_tree)).unwrap();
+
+        let epoch_before = alice_group.epoch();
+        let composite = alice_group
+            .commit_group_changes(
+                &alice_provider,
+                &alice,
+                vec!["bob".to_string()],
+                vec![charlie.key_package(&charlie_provider)],
+                false,
+            )
+            .unwrap();
+        assert!(composite.has_welcome());
+
+        // Dave never receives standalone remove/add proposals. Processing only the commit proves
+        // the composite commit carries the requested proposals by value.
+        dave_group
+            .process_message(&mut dave_provider, &composite.commit())
+            .map_err(js_error_to_string)
+            .unwrap();
+
+        alice_group
+            .merge_pending_commit(&mut alice_provider)
+            .unwrap();
+        assert_eq!(alice_group.epoch(), epoch_before + 1);
+        assert!(alice_group.member_by_user_id("bob").is_none());
+        assert!(alice_group.member_by_user_id("charlie").is_some());
+        assert!(dave_group.member_by_user_id("bob").is_none());
+        assert!(dave_group.member_by_user_id("charlie").is_some());
+    }
+
+    #[test]
+    fn test_commit_member_add_with_removals_wrapper() {
+        let (mut alice_provider, alice, mut alice_group, mut dave_provider, mut dave_group) =
+            create_group_alice_bob_dave();
+        let charlie_provider = Provider::new();
+        let charlie = Identity::new(&charlie_provider, "charlie").unwrap();
+
+        let epoch_before = alice_group.epoch();
+        let composite = alice_group
+            .commit_member_add_with_removals(
+                &alice_provider,
+                &alice,
+                vec!["bob".to_string()],
+                vec![charlie.key_package(&charlie_provider)],
+            )
+            .unwrap();
+
+        assert!(composite.has_welcome());
+        dave_group
+            .process_message(&mut dave_provider, &composite.commit())
+            .map_err(js_error_to_string)
+            .unwrap();
+        alice_group
+            .merge_pending_commit(&mut alice_provider)
+            .unwrap();
+
+        assert_eq!(alice_group.epoch(), epoch_before + 1);
+        assert!(alice_group.member_by_user_id("bob").is_none());
+        assert!(alice_group.member_by_user_id("charlie").is_some());
+        assert!(dave_group.member_by_user_id("bob").is_none());
+        assert!(dave_group.member_by_user_id("charlie").is_some());
+    }
+
+    #[test]
+    fn test_commit_self_update_with_removals_wrapper() {
+        let (mut alice_provider, alice, mut alice_group, mut dave_provider, mut dave_group) =
+            create_group_alice_bob_dave();
+
+        let epoch_before = alice_group.epoch();
+        let composite = alice_group
+            .commit_self_update_with_removals(&alice_provider, &alice, vec!["bob".to_string()])
+            .unwrap();
+
+        assert!(!composite.has_welcome());
+        dave_group
+            .process_message(&mut dave_provider, &composite.commit())
+            .map_err(js_error_to_string)
+            .unwrap();
+        alice_group
+            .merge_pending_commit(&mut alice_provider)
+            .unwrap();
+
+        assert_eq!(alice_group.epoch(), epoch_before + 1);
+        assert!(alice_group.member_by_user_id("bob").is_none());
+        assert!(dave_group.member_by_user_id("bob").is_none());
+    }
+
+    #[test]
+    fn test_commit_member_removals_wrapper() {
+        let (mut alice_provider, alice, mut alice_group, mut dave_provider, mut dave_group) =
+            create_group_alice_bob_dave();
+
+        let epoch_before = alice_group.epoch();
+        let composite = alice_group
+            .commit_member_removals(&alice_provider, &alice, vec!["bob".to_string()])
+            .unwrap();
+
+        assert!(!composite.has_welcome());
+        dave_group
+            .process_message(&mut dave_provider, &composite.commit())
+            .map_err(js_error_to_string)
+            .unwrap();
+        alice_group
+            .merge_pending_commit(&mut alice_provider)
+            .unwrap();
+
+        assert_eq!(alice_group.epoch(), epoch_before + 1);
+        assert!(alice_group.member_by_user_id("bob").is_none());
+        assert!(dave_group.member_by_user_id("bob").is_none());
+    }
+
+    #[test]
     fn test_member_info() {
         let (_, _, chess_club_alice, _, _, _) = create_group_alice_and_bob();
 
@@ -342,10 +529,7 @@ mod tests {
 
         // The restored provider should still have Alice's signature key pair
         // which means we can create new key packages with it
-        let alice_restored = Identity::from_bytes(
-            &restored,
-            &alice.to_bytes().unwrap(),
-        ).unwrap();
+        let alice_restored = Identity::from_bytes(&restored, &alice.to_bytes().unwrap()).unwrap();
         assert_eq!(alice_restored.user_id(), "alice");
 
         // Generate a new key package from restored provider — would panic
