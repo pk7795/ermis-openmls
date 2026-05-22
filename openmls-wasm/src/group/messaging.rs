@@ -4,6 +4,7 @@ use openmls::{
     framing::{MlsMessageBodyIn, MlsMessageIn},
     group::{
         decrypt_with_epoch_archive as openmls_decrypt_with_epoch_archive,
+        decrypt_with_epoch_archive_v2 as openmls_decrypt_with_epoch_archive_v2,
         peek_sender_data_from_archive as openmls_peek_sender_data_from_archive,
         RecoveryDecryptOptions,
     },
@@ -219,6 +220,38 @@ pub fn decrypt_with_epoch_archive(
         },
     )
     .map_err(|e| JsError::new(&format!("Decrypt with epoch archive error: {e}")))?;
+    Ok(ArchivedMessage {
+        content: plaintext.content,
+        sender_index: plaintext.sender_index,
+        generation: plaintext.generation,
+        epoch: plaintext.epoch,
+        aad: plaintext.aad,
+        own_message: plaintext.own_message,
+    })
+}
+
+/// Decrypt and verify an MLS private message using a V2 archive + snapshot.
+#[wasm_bindgen]
+pub fn decrypt_with_epoch_archive_v2(
+    provider: &Provider,
+    archive: &[u8],
+    snapshot: &[u8],
+    ciphertext: &[u8],
+    allow_own_messages: bool,
+    max_forward_distance: u32,
+) -> Result<ArchivedMessage, JsError> {
+    let max_forward_distance = (max_forward_distance != 0).then_some(max_forward_distance);
+    let plaintext = openmls_decrypt_with_epoch_archive_v2(
+        provider.0.crypto(),
+        archive,
+        snapshot,
+        ciphertext,
+        RecoveryDecryptOptions {
+            allow_own_messages,
+            max_forward_distance,
+        },
+    )
+    .map_err(|e| JsError::new(&format!("Decrypt with epoch archive v2 error: {e}")))?;
     Ok(ArchivedMessage {
         content: plaintext.content,
         sender_index: plaintext.sender_index,

@@ -16,6 +16,31 @@ pub struct MemberInfo {
 }
 
 #[wasm_bindgen]
+pub struct ExportedEpochArchiveV2 {
+    archive_bytes: Vec<u8>,
+    snapshot_bytes: Vec<u8>,
+    snapshot_hash: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl ExportedEpochArchiveV2 {
+    #[wasm_bindgen(getter)]
+    pub fn archive_bytes(&self) -> Vec<u8> {
+        self.archive_bytes.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn snapshot_bytes(&self) -> Vec<u8> {
+        self.snapshot_bytes.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn snapshot_hash(&self) -> Vec<u8> {
+        self.snapshot_hash.clone()
+    }
+}
+
+#[wasm_bindgen]
 impl MemberInfo {
     /// Get the member's leaf index
     #[wasm_bindgen(getter)]
@@ -133,6 +158,19 @@ impl Group {
         self.mls_group
             .export_current_epoch_archive()
             .map_err(|e| JsError::new(&format!("Archive current epoch error: {e}")))
+    }
+
+    /// Export V2 archive bytes plus canonical member snapshot.
+    pub fn archive_epoch_v2(&self) -> Result<ExportedEpochArchiveV2, JsError> {
+        let exported = self
+            .mls_group
+            .export_epoch_archive_v2()
+            .map_err(|e| JsError::new(&format!("Archive epoch v2 error: {e}")))?;
+        Ok(ExportedEpochArchiveV2 {
+            archive_bytes: exported.archive_bytes,
+            snapshot_bytes: exported.snapshot_bytes,
+            snapshot_hash: exported.snapshot_hash.to_vec(),
+        })
     }
 
     /// Export group info for external commits
