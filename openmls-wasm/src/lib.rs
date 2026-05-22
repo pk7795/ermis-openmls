@@ -31,6 +31,7 @@
 pub mod errors;
 pub mod group;
 pub mod identity;
+pub mod recovery_vault;
 pub mod types;
 mod utils;
 
@@ -38,6 +39,7 @@ mod utils;
 pub use errors::*;
 pub use group::*;
 pub use identity::*;
+pub use recovery_vault::*;
 pub use types::*;
 
 use openmls_rust_crypto::OpenMlsRustCrypto;

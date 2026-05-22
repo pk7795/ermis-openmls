@@ -1379,6 +1379,39 @@ npm run build
 
 Result: production build passed.
 
+### 2026-05-22 — Production — Web/WASM PIN Epoch Archive V1
+
+Goal: promote the PIN epoch archive POC into production APIs for web/WASM first.
+
+Locked decisions:
+
+- V1 is PIN-only with an 8 digit minimum and PBKDF2-SHA256 at 600,000+ iterations.
+- Recovery key rotation and passkey/WebAuthn are deferred.
+- Account-owned archives are the only V1 archive scope.
+- Archive V2 separates private epoch secrets from canonical member snapshots.
+- `decrypt_with_epoch_archive_v2()` verifies `SHA256(snapshot_bytes) == member_snapshot_hash`.
+- Archive ADKs are wrapped with HPKE via the public `OpenMlsCrypto::hpke_seal/open` methods.
+- WASM uses `crate::CIPHERSUITE` for recovery HPKE keys and JSON for `WrappedRecoveryKey.to_bytes()`.
+- Bellboy stores opaque recovery/archive material and filters archive material by caller wrap `(epoch, blob_id)` plus restore policy.
+- Historical ciphertext restore reads latest timeline snapshots from `{cid}`; E2EE edits overwrite the timeline `MessageNew` event in place.
+
+Implementation status:
+
+- OpenMLS added additive V2 export/decrypt APIs without changing V1.
+- openmls-wasm added recovery vault, archive blob AES-GCM, HPKE ADK wrapping, and V2 archive/decrypt wrappers.
+- Bellboy added recovery vault and MLS archive services, routes, metrics, recovery vault SQL migration, direct datastore cursor restore, and membership interval hooks for primary E2EE flows.
+- Ermis SDK added recovery APIs, upload queue storage, PIN setup/unlock/change, archive upload, and historical restore orchestration.
+- React package added reusable PIN setup/unlock/change/status/gap components and `useRecoveryPin()`.
+
+Verification:
+
+```bash
+cd /Users/khoakheu/Ermis-workspace/chat/openmls
+cargo check -p openmls-wasm
+```
+
+Result: check passed.
+
 ### 2026-05-14 — POC — Chatbox Internal Scroll UI Fix
 
 Goal: keep `react-chat-v4` usable after many restored/live messages by preventing chat cards from growing vertically past the viewport.

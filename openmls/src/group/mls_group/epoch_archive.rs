@@ -6,6 +6,7 @@
 
 use openmls_traits::{crypto::OpenMlsCrypto, types::Ciphersuite};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tls_codec::Deserialize as _;
 
@@ -15,7 +16,7 @@ use crate::{
         signable::Verifiable,
         signature::{OpenMlsSignaturePublicKey, SignaturePublicKey},
     },
-    credentials::CredentialWithKey,
+    credentials::{BasicCredential, Credential, CredentialWithKey},
     framing::{
         mls_content::FramedContentBody, private_message_in::PrivateMessageIn,
         validation::SenderContext, ContentType, MlsMessageBodyIn, MlsMessageIn, Sender,
@@ -29,6 +30,8 @@ use crate::{
 use super::{Member, MlsGroup};
 
 const EPOCH_ARCHIVE_VERSION: u16 = 1;
+const EPOCH_ARCHIVE_V2_VERSION: u16 = 2;
+const RECOVERY_SNAPSHOT_VERSION: u16 = 2;
 
 /// Errors returned by epoch archive export and recovery decryption.
 #[derive(Debug, Error)]
@@ -48,6 +51,12 @@ pub enum EpochArchiveError {
     /// The archive format version is not supported by this build.
     #[error("archive version {0} is not supported")]
     UnsupportedArchiveVersion(u16),
+    /// The V2 snapshot hash does not match the archive binding.
+    #[error("snapshot hash does not match archive")]
+    SnapshotHashMismatch,
+    /// The V2 archive or snapshot is malformed.
+    #[error("invalid v2 archive snapshot: {0}")]
+    Snapshot(String),
     /// The ciphertext group ID does not match the archive group ID.
     #[error("ciphertext belongs to a different group")]
     WrongGroup,
@@ -134,6 +143,17 @@ pub struct ArchivedPlaintext {
     pub own_message: bool,
 }
 
+/// V2 export separates private epoch secrets from public member verification material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportedEpochArchiveV2 {
+    /// JSON archive bytes containing epoch-local private MLS secrets.
+    pub archive_bytes: Vec<u8>,
+    /// Canonical JSON member snapshot bytes used for recovery verification.
+    pub snapshot_bytes: Vec<u8>,
+    /// SHA-256 digest of `snapshot_bytes`.
+    pub snapshot_hash: [u8; 32],
+}
+
 #[derive(Serialize, Deserialize)]
 struct EpochArchive {
     archive_version: u16,
@@ -160,6 +180,50 @@ struct EpochArchiveRef<'a> {
     own_leaf_index: LeafNodeIndex,
 }
 
+#[derive(Serialize, Deserialize)]
+struct EpochArchiveV2 {
+    archive_version: u16,
+    group_id: GroupId,
+    epoch: GroupEpoch,
+    ciphersuite: Ciphersuite,
+    protocol_version: ProtocolVersion,
+    sender_ratchet_config: SenderRatchetConfiguration,
+    message_secrets: MessageSecrets,
+    own_leaf_index: LeafNodeIndex,
+    member_snapshot_hash: [u8; 32],
+}
+
+#[derive(Serialize)]
+struct EpochArchiveV2Ref<'a> {
+    archive_version: u16,
+    group_id: GroupId,
+    epoch: GroupEpoch,
+    ciphersuite: Ciphersuite,
+    protocol_version: ProtocolVersion,
+    sender_ratchet_config: SenderRatchetConfiguration,
+    message_secrets: &'a MessageSecrets,
+    own_leaf_index: LeafNodeIndex,
+    member_snapshot_hash: [u8; 32],
+}
+
+#[derive(Serialize, Deserialize)]
+struct RecoveryMemberSnapshot {
+    snapshot_version: u16,
+    hash_mode: String,
+    group_id: GroupId,
+    protocol_version: ProtocolVersion,
+    ciphersuite: Ciphersuite,
+    signature_scheme: String,
+    members: Vec<RecoveryMember>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RecoveryMember {
+    leaf_index: u32,
+    user_id: String,
+    signature_key: Vec<u8>,
+}
+
 impl MlsGroup {
     /// Export an archive of the current fresh epoch.
     ///
@@ -178,6 +242,36 @@ impl MlsGroup {
             own_leaf_index: self.own_leaf_index(),
         };
         serde_json::to_vec(&archive).map_err(EpochArchiveError::Serialize)
+    }
+
+    /// Export V2 archive bytes plus a canonical member snapshot.
+    pub fn export_epoch_archive_v2(&self) -> Result<ExportedEpochArchiveV2, EpochArchiveError> {
+        let leaves: Vec<Member> = self.members().collect();
+        let snapshot = build_member_snapshot(
+            self.group_id().clone(),
+            self.version(),
+            self.ciphersuite(),
+            &leaves,
+        )?;
+        let snapshot_bytes = serde_json::to_vec(&snapshot).map_err(EpochArchiveError::Serialize)?;
+        let snapshot_hash = Sha256::digest(&snapshot_bytes).into();
+        let archive = EpochArchiveV2Ref {
+            archive_version: EPOCH_ARCHIVE_V2_VERSION,
+            group_id: self.group_id().clone(),
+            epoch: self.epoch(),
+            ciphersuite: self.ciphersuite(),
+            protocol_version: self.version(),
+            sender_ratchet_config: *self.configuration().sender_ratchet_configuration(),
+            message_secrets: self.message_secrets_store.message_secrets(),
+            own_leaf_index: self.own_leaf_index(),
+            member_snapshot_hash: snapshot_hash,
+        };
+        let archive_bytes = serde_json::to_vec(&archive).map_err(EpochArchiveError::Serialize)?;
+        Ok(ExportedEpochArchiveV2 {
+            archive_bytes,
+            snapshot_bytes,
+            snapshot_hash,
+        })
     }
 }
 
@@ -209,7 +303,52 @@ pub fn decrypt_with_epoch_archive(
     ciphertext_bytes: &[u8],
     options: RecoveryDecryptOptions,
 ) -> Result<ArchivedPlaintext, EpochArchiveError> {
-    let mut archive = parse_archive(archive_bytes)?;
+    let archive = parse_archive(archive_bytes)?;
+    decrypt_with_archive(crypto, archive, ciphertext_bytes, options)
+}
+
+/// Decrypt and verify an application private message with V2 archive + snapshot.
+pub fn decrypt_with_epoch_archive_v2(
+    crypto: &impl OpenMlsCrypto,
+    archive_bytes: &[u8],
+    snapshot_bytes: &[u8],
+    ciphertext_bytes: &[u8],
+    options: RecoveryDecryptOptions,
+) -> Result<ArchivedPlaintext, EpochArchiveError> {
+    let archive_v2: EpochArchiveV2 =
+        serde_json::from_slice(archive_bytes).map_err(EpochArchiveError::Deserialize)?;
+    if archive_v2.archive_version != EPOCH_ARCHIVE_V2_VERSION {
+        return Err(EpochArchiveError::UnsupportedArchiveVersion(
+            archive_v2.archive_version,
+        ));
+    }
+    let snapshot_hash: [u8; 32] = Sha256::digest(snapshot_bytes).into();
+    if snapshot_hash != archive_v2.member_snapshot_hash {
+        return Err(EpochArchiveError::SnapshotHashMismatch);
+    }
+    let snapshot: RecoveryMemberSnapshot =
+        serde_json::from_slice(snapshot_bytes).map_err(EpochArchiveError::Deserialize)?;
+    let leaves = snapshot_to_members(&snapshot, &archive_v2)?;
+    let archive = EpochArchive {
+        archive_version: EPOCH_ARCHIVE_VERSION,
+        group_id: archive_v2.group_id,
+        epoch: archive_v2.epoch,
+        ciphersuite: archive_v2.ciphersuite,
+        protocol_version: archive_v2.protocol_version,
+        sender_ratchet_config: archive_v2.sender_ratchet_config,
+        message_secrets: archive_v2.message_secrets,
+        leaves,
+        own_leaf_index: archive_v2.own_leaf_index,
+    };
+    decrypt_with_archive(crypto, archive, ciphertext_bytes, options)
+}
+
+fn decrypt_with_archive(
+    crypto: &impl OpenMlsCrypto,
+    mut archive: EpochArchive,
+    ciphertext_bytes: &[u8],
+    options: RecoveryDecryptOptions,
+) -> Result<ArchivedPlaintext, EpochArchiveError> {
     let (message_version, ciphertext) = parse_private_message(ciphertext_bytes)?;
     validate_ciphertext_scope(&archive, &ciphertext, Some(message_version))?;
 
@@ -277,6 +416,73 @@ pub fn decrypt_with_epoch_archive(
         epoch: content.epoch().as_u64(),
         own_message,
     })
+}
+
+fn build_member_snapshot(
+    group_id: GroupId,
+    protocol_version: ProtocolVersion,
+    ciphersuite: Ciphersuite,
+    leaves: &[Member],
+) -> Result<RecoveryMemberSnapshot, EpochArchiveError> {
+    let mut members = leaves
+        .iter()
+        .map(|member| {
+            let basic = BasicCredential::try_from(member.credential.clone())
+                .map_err(|error| EpochArchiveError::Snapshot(error.to_string()))?;
+            let user_id = String::from_utf8(basic.identity().to_vec())
+                .map_err(|error| EpochArchiveError::Snapshot(error.to_string()))?;
+            Ok(RecoveryMember {
+                leaf_index: member.index.u32(),
+                user_id,
+                signature_key: member.signature_key.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, EpochArchiveError>>()?;
+    members.sort_by_key(|member| member.leaf_index);
+    Ok(RecoveryMemberSnapshot {
+        snapshot_version: RECOVERY_SNAPSHOT_VERSION,
+        hash_mode: "optimized-member-signatures".to_string(),
+        group_id,
+        protocol_version,
+        ciphersuite,
+        signature_scheme: format!("{:?}", ciphersuite.signature_algorithm()),
+        members,
+    })
+}
+
+fn snapshot_to_members(
+    snapshot: &RecoveryMemberSnapshot,
+    archive: &EpochArchiveV2,
+) -> Result<Vec<Member>, EpochArchiveError> {
+    if snapshot.snapshot_version != RECOVERY_SNAPSHOT_VERSION {
+        return Err(EpochArchiveError::Snapshot(
+            "unsupported snapshot version".to_string(),
+        ));
+    }
+    if snapshot.group_id != archive.group_id
+        || snapshot.protocol_version != archive.protocol_version
+        || snapshot.ciphersuite != archive.ciphersuite
+    {
+        return Err(EpochArchiveError::Snapshot(
+            "snapshot scope does not match archive".to_string(),
+        ));
+    }
+    let mut members = snapshot
+        .members
+        .iter()
+        .map(|member| {
+            Ok(Member {
+                index: LeafNodeIndex::new(member.leaf_index),
+                credential: Credential::from(BasicCredential::new(
+                    member.user_id.as_bytes().to_vec(),
+                )),
+                encryption_key: Vec::new(),
+                signature_key: member.signature_key.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, EpochArchiveError>>()?;
+    members.sort_by_key(|member| member.index);
+    Ok(members)
 }
 
 fn parse_archive(archive_bytes: &[u8]) -> Result<EpochArchive, EpochArchiveError> {

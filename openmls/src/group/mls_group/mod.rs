@@ -55,8 +55,9 @@ mod updates;
 
 use config::*;
 pub use epoch_archive::{
-    decrypt_with_epoch_archive, peek_sender_data_from_archive, ArchivedPlaintext,
-    ArchivedSenderData, EpochArchiveError, RecoveryDecryptOptions,
+    decrypt_with_epoch_archive, decrypt_with_epoch_archive_v2, peek_sender_data_from_archive,
+    ArchivedPlaintext, ArchivedSenderData, EpochArchiveError, ExportedEpochArchiveV2,
+    RecoveryDecryptOptions,
 };
 
 // Crate
