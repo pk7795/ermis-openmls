@@ -498,7 +498,10 @@ This gives the POC the behavior production wants to study: self-update/key-rotat
 Check in code:
 
 ```ts
-const snapshotBytes = canonicalizeRecoverySnapshot(group.members(), group.groupId());
+const snapshotBytes = canonicalizeRecoverySnapshot(
+  group.members(),
+  group.groupId()
+);
 const snapshotHash = await sha256Hex(snapshotBytes);
 
 if (memberSnapshotStore.has(snapshotHash)) {
@@ -1189,7 +1192,7 @@ type ArchiveBlobRecord = {
   archiveBlobId: string;
   channelId: string;
   epoch: number;
-  scope: 'account_owned' | 'group_sponsored';
+  scope: "account_owned" | "group_sponsored";
   exporterUserId: string;
   exporterDeviceId: string;
   memberSnapshotHash: string;
@@ -1274,7 +1277,6 @@ Build verification:
 cd openmls-wasm/static/react-chat-v4
 npm run build
 ```
-
 
 ## 14. Open Research Questions
 
@@ -1379,6 +1381,240 @@ npm run build
 
 Result: production build passed.
 
+### 2026-06-19 — Production — PIN Settings Restore Diagnostics
+
+Goal: move terminal unavailable-history warnings out of individual Uhm Chat channels and into the account-level Chat history PIN settings dialog.
+
+Code changed:
+
+- `packages/ermis-chat-sdk/src/encryption/types.ts` and `manager.ts`
+  - added `RecoveryStatus.restoreProgressWithIssues`.
+  - `getRecoveryStatus()` now returns normalized incomplete and done-with-gap restore progress records, while keeping the existing CID arrays for compatibility.
+- `packages/ermis-chat-react/src/hooks/useRecoveryPin.ts`
+  - surfaces `restoreProgressWithIssues` through `recoveryStatus`.
+- `apps/uhm-chat/src/features/chat/UhmRecoveryPinDialog.tsx`
+  - renders a compact "Some history unavailable" panel in account PIN settings above Change PIN.
+  - the Details dropdown groups affected channels and shows message count, epochs, and primary reason.
+- `apps/uhm-chat/src/pages/ChatPage.tsx`
+  - removed permanent-gap channel header badges and timeline warning banners.
+  - running/pending restore progress still stays visible in the active channel.
+- `apps/uhm-chat/src/locales/en.json` and `vi.json`
+  - added localized PIN-settings diagnostics copy.
+- SDK, React, and Uhm README files document the new status field and UX behavior.
+
+Design decisions:
+
+- Keep permanent/unavailable history in one account-level recovery surface so users do not see the same warning repeated across channels.
+- Keep `getRestoreProgress(channelType, channelId)` for selected-channel progress and repair flows; use `restoreProgressWithIssues` for global settings diagnostics.
+- This is an additive client-side SDK/UI contract. Bellboy API, SQL, Postman collection, and server event semantics are unchanged.
+
+Performance:
+
+- `getRecoveryStatus()` remains `O(I + G)` time and memory for incomplete restore records `I` and done-with-gap records `G`.
+- IndexedDB access stays at the existing local incomplete/gap status-index reads.
+- No network requests, server database round trips, server payload growth, hot partitions, or backend contention are added.
+
+Verification:
+
+- `npm run build:sdk` passed.
+- `npm run build:react` passed.
+- `yarn workspace uhm-chat build` passed.
+- `yarn workspace @ermis-network/ermis-chat-sdk test:repair` passed.
+
+### 2026-06-14 — Production — Archive-First Repair and Group-Sponsored Archive
+
+Goal: close recovery gaps when every device of a recipient is offline during epoch transitions and avoid false unavailable results from late archive candidates.
+
+Sponsored recipient eligibility is not retroactive: a recovery public key must already exist when the epoch transition is persisted. A key created later cannot receive a wrap for an older epoch in this version.
+
+Code changed:
+
+- Ermis SDK Repair now tries archives before protocol replay, flushes pending ciphertext, and performs a final archive recheck.
+- Restore tries alternate archive candidates lazily per message; `Generation is too old` from one candidate is not terminal.
+- SDK captures a scope-independent epoch checkpoint after Welcome/commit merge and materializes separate account-owned and group-sponsored blobs because archive AAD and wrap info bind scope.
+- Bellboy opens membership intervals at cryptographic inclusion and reconciles legacy intervals only from persisted bootstrap Welcome proof.
+- Bellboy adds sponsored recipient query, canonical recipient-set hash validation, exact multi-wrap validation, complete sponsored manifests, and a two-candidate distinct-exporter cap.
+
+Design decisions:
+
+- OpenMLS archive bytes and WASM formats remain unchanged.
+- Network recipient query/wrap/upload never blocks ordered MLS event processing.
+- Account-owned and sponsored ACK/pending identities are scope-aware.
+- Only `expired_restore_window` is terminal; consumed-generation errors can still recover from alternate archive material.
+- No SQL migration is required because sponsored manifests and membership intervals remain K-V records.
+
+Verification:
+
+- `cargo check` and targeted `cargo test mls_archive` passed in Bellboy.
+- SDK production build and recovery repair tests passed.
+
+### 2026-06-01 — Production — uhm-chat Recovery Gate Integration
+
+Goal: connect the production v2.3 restore progress model to the real uhm-chat application UX.
+
+Code changed:
+
+- Ermis SDK restore now fetches target epochs in bounded batches/ranges, persists progress per epoch, emits `e2ee.initialized` / `e2ee.restore_progress`, and exposes `getRestoreProgress()` for UI consumers.
+- React `useRecoveryPin()` listens for MLS initialization and restore progress events, then exposes per-channel progress loading.
+- uhm-chat reuses its localized PIN dialog as a soft login/app-entry recovery gate, unlocks the recovery vault, lets the SDK queue resume incomplete channels, and renders active-channel progress/gap indicators.
+
+Design decisions:
+
+- Restore remains sequential by channel to avoid WASM decrypt, network, and IndexedDB write spikes.
+- Epoch material is fetched in bounded batches instead of one request per epoch or one unbounded range.
+- Gap records remain restore metadata and are rendered as warnings, not fake timeline messages.
+
+Verification:
+
+```bash
+cd /Users/khoakheu/Ermis-workspace/chat/ermis-chat-monorepo
+npm run build:uhm
+```
+
+Result: SDK, React package, and uhm-chat production builds passed.
+
+### 2026-06-01 — Production — Deferred Archive Before PIN
+
+Goal: avoid losing archive coverage when a device advances MLS epochs before the user has created or unlocked a recovery PIN vault.
+
+Code changed:
+
+- SDK archive export now runs even without recovery public metadata. The encrypted archive blob is kept with its ADK encrypted by a device-local non-extractable WebCrypto AES-GCM key.
+- Deferred archive records live in the user-scoped MLS IndexedDB and are flushed once vault public metadata becomes available through setup, unlock, or vault discovery.
+- Archive upload acknowledgements are persisted per `(cid, epoch, recovery_key_id)` so `idempotent` and `duplicate_cap` responses stop retry/log churn.
+- Internal commit/join/rotate archive hooks use safe wrappers so archive export/stash/upload failure does not roll back or fail the MLS epoch transition.
+- uhm-chat recovery gate copy now distinguishes actual incomplete restore records from generic locked-vault archive setup.
+
+Design decisions:
+
+- Deferred archive storage is per device and best-effort; losing the local IndexedDB before vault setup loses those pre-PIN deferred archives.
+- Raw archive bytes and raw ADKs are never stored. The local deferred stash only stores AES-GCM ciphertext plus metadata/snapshots.
+- Bellboy wire/API behavior is unchanged.
+
+Verification:
+
+```bash
+cd /Users/khoakheu/Ermis-workspace/chat/ermis-chat-monorepo
+npm run build:uhm
+```
+
+Result: SDK, React package, and uhm-chat production builds passed.
+
+### 2026-06-01 — Production — Recovery Vault Fetch Cache
+
+Goal: fix reload behavior where every recovery status refresh triggered another `GET /v1/e2ee/recovery/vault`, producing many duplicate vault requests across devices.
+
+Code changed:
+
+- `MlsManager` now caches vault existence and encrypted vault bytes/public metadata after the first successful or missing-vault lookup.
+- Concurrent `_loadRecoveryPublicMetadata()` calls share one in-flight promise, so `e2ee.initialized`, dialog open, and restore-progress refreshes no longer fan out into duplicate network requests.
+- Unlock now reuses cached vault bytes when present instead of fetching the vault again.
+- Destroy/logout still clears the recovery cache along with MLS manager state.
+
+Design decision:
+
+- The cache contains only encrypted vault material and public recovery metadata. The recovery private key is still derived only after PIN entry and remains memory-only.
+
+Verification:
+
+```bash
+cd /Users/khoakheu/Ermis-workspace/chat/ermis-chat-monorepo
+npm run build:uhm
+```
+
+Result: SDK, React package, and uhm-chat production builds passed.
+
+### 2026-06-01 — Production — Login Bootstrap And Known Channel External Join
+
+Goal: fix real-app first-login failures where ChannelList could query `/channels` before auth token setup completed, and remove the lazy requirement that a user click each E2EE channel before external join/restore starts.
+
+Code changed:
+
+- uhm-chat now waits for `connectUser()` and MLS initialization before rendering `ChatPage`, so ChannelList cannot issue the first `/channels` request with `Authorization: Bearer undefined`.
+- Ermis SDK added `bootstrapKnownE2eeChannels()` and an internal `channels.queried` listener. After ChannelList hydrates `client.activeChannels`, the SDK scans loaded non-pending E2EE channels, external-joins missing local groups sequentially, archives joined epochs, and emits `e2ee.bootstrap_progress`.
+- PIN unlock now works with the known-channel bootstrap flow: if the private recovery key is already unlocked, newly prepared channels are enqueued for background restore; otherwise they remain ready for restore after PIN entry.
+- uhm-chat displays a compact secure-restore preparation banner while E2EE bootstrap is running.
+
+Design decisions:
+
+- Auth readiness is hard-gated before the chat shell mounts; external join and restore preparation are non-blocking once the authenticated chat UI is visible.
+- Startup external join remains sequential to avoid Provider/IndexedDB/WASM races.
+- Restore still waits for a local MLS group and then runs through the existing one-channel restore queue.
+
+Verification:
+
+- `npm run build:uhm` passed.
+
+### 2026-06-01 — Production — Empty Cache Chat Route Auth Guard Fix
+
+Goal: fix `/chat` reload after clearing browser site data getting stuck on the bootstrap screen with no saved auth token.
+
+Code changed:
+
+- uhm-chat `AuthRoute` now redirects unauthenticated users to `/login` before checking `chatReady`.
+- The bootstrap screen is reserved for authenticated sessions that are still connecting or preparing E2EE.
+
+Design decision:
+
+- Missing tokens are an authentication state, not a bootstrap state. The app should return to login immediately instead of waiting for a client session that cannot be restored.
+
+Verification:
+
+- `npm run build:uhm` passed.
+
+### 2026-06-01 — Production — Recovery Gate and Archive Coverage Fixes
+
+Goal: address manual multi-device bugs in the real app: login did not always show the recovery prompt, owner-created rooms could miss epoch 1 archive material, and invited members only uploaded the join epoch after syncing later commits.
+
+Code changed:
+
+- Ermis SDK now loads recovery public metadata from the server vault during MLS initialization, before sync, so archive upload does not require PIN unlock and incoming commits can be archived as they are processed.
+- `setupRecoveryPin()` and `unlockRecoveryVault()` now archive known E2EE channels before enqueueing restore, and restore enqueue also includes known E2EE channels with no local progress record for first-time restore on a new device.
+- `processCommit()` uploads an account-owned archive after each successfully processed incoming commit, covering member devices that advance through epochs during sync.
+- React channel creation now triggers an initial archive after the server channel exists, closing the epoch 1 gap for new rooms.
+- uhm-chat recovery gate now supports both no-vault setup and locked-vault unlock, and opens even when a new device has no prior `restore_progress` record.
+
+Design decisions:
+
+- Locked devices may cache recovery public key metadata, key id, ciphersuite, and wrapped vault bytes, but never persist or expose the recovery private key until PIN unlock.
+- Archive upload idempotency is per generated archive blob so legitimate re-exports from the same device reach Bellboy dedup policy instead of failing as idempotency conflicts.
+- Messages sent before any recovery vault/public key existed and before any archive was produced remain unrecoverable; the app should prompt setup early to prevent that state going forward.
+
+Verification:
+
+```bash
+cd /Users/khoakheu/Ermis-workspace/chat/ermis-chat-monorepo
+npm run build:uhm
+```
+
+Result: SDK, React package, and uhm-chat production builds passed.
+
+### 2026-06-01 — Production — PIN Epoch Archive v2.3 UX + Dedup Delta
+
+Goal: harden the production PIN Epoch Archive flow with upload deduplication, resumable restore progress, and recovery UX state.
+
+Code changed:
+
+- Bellboy MLS archive upload now returns structured `{ ok, stored, reason, message }` results and caps duplicate archives at two blobs per `(cid, epoch, user_hash, recovery_key_id)`.
+- Ermis SDK added recovery status, per-device `restore_progress` IndexedDB records, restore queue orchestration, per-epoch progress persistence, and memory-only recovery unlock cleanup.
+- React recovery PIN components now expose recovery status, a dialog-style recovery gate, and restore progress/gap rendering helpers.
+
+Docs/artifacts changed:
+
+- `bellboy/docs/pin/IMPLEMENTATION_PLAN.md` now records v2.3 as the current delta.
+- `bellboy/docs/e2ee_api_reference.md`, `bellboy/docs/e2ee_frontend_guide.md`, and the Postman collection document the structured archive upload response and restore-progress behavior.
+
+Design decisions:
+
+- `stored=false` is terminal success for SDK upload queues.
+- Dedup uses the existing wrap-key prefix with 10-digit epoch padding to stay aligned with Bellboy K-V keys.
+- Restore progress is per device and never stores recovery private keys, ADKs, archive plaintext, or message plaintext beyond the existing decrypted message cache.
+- `done_with_gaps` is terminal so permanent gaps do not trigger endless PIN prompts.
+
+Verification:
+
+- Pending at the time of this log entry: targeted Rust/TypeScript checks should be run after the v2.3 patch.
+
 ### 2026-05-22 — Production — Web/WASM PIN Epoch Archive V1
 
 Goal: promote the PIN epoch archive POC into production APIs for web/WASM first.
@@ -1411,6 +1647,90 @@ cargo check -p openmls-wasm
 ```
 
 Result: check passed.
+
+### 2026-06-13 — Production — Message-Level Recovery Repair
+
+Goal: replace epoch-only restore reporting and the channel-header PIN modal with message-level repair and account-scoped PIN management.
+
+Code changed:
+
+- Ermis SDK stores `RepairIssue` entries in existing restore-progress records and unifies WebSocket, sync, pending snapshot, and archive decrypt failures.
+- `repairRecoveryChannel()` supports failed-only repair and selected-timeline recheck while skipping valid local plaintext.
+- Recovery PIN change can rewrap the already-unlocked private key through `changeUnlockedRecoveryPin(newPin)`; the compatibility old-PIN API remains.
+- React exposes the new repair/change methods and passes the active channel into custom Channel Info actions.
+- Uhm Chat moves PIN setup/unlock/change to the account menu and adds encrypted-history repair to Channel Info.
+- Uhm Chat exposes one `Repair` button backed by selected-timeline recheck; SDK retry modes remain an implementation detail.
+- Channel Info uses conversation-oriented copy, a neutral secondary Repair button, and an inline detail dropdown instead of a modal or inline message diagnostics.
+
+Design decisions:
+
+- `completed_epochs` is metadata, not a message-level dedupe key.
+- Manual repair can retry blocked archive-material issues, while terminal issues remain visible but are not retried.
+- No OpenMLS/WASM, Bellboy API, SQL, or Postman change is needed. Old-PIN validation remains the existing local AES-GCM unwrap.
+- No IndexedDB version bump is needed because issue fields are added to existing records.
+
+Verification:
+
+- `yarn workspace @ermis-network/ermis-chat-sdk test:repair` passed 5 regression tests.
+- `npm run build:sdk` passed.
+- `npm run build:react` passed.
+- `yarn workspace uhm-chat build` passed.
+- Targeted ESLint for the new Sidebar, PIN dialog, and Channel Info repair components passed.
+- Full Uhm lint remains blocked by pre-existing repository errors, including generated `dev-dist` files and unrelated legacy source warnings.
+
+### 2026-06-13 — Production — WhatsApp-Style PIN and Repair Content
+
+Goal: simplify the Uhm Chat recovery surface so users see a chat-history flow instead of recovery infrastructure terms.
+
+Code changed:
+
+- `apps/uhm-chat/src/features/chat/UhmRecoveryPinDialog.tsx` now supports a `repair` variant. When Channel Info repair needs the PIN, the dialog uses repair-specific setup/unlock copy and a neutral Continue action instead of account/vault wording.
+- `apps/uhm-chat/src/features/chat/UhmChannelInfoActions.tsx` opens the PIN dialog in repair mode and uses user-friendly fallback repair reasons.
+- `apps/uhm-chat/src/locales/en.json` and `apps/uhm-chat/src/locales/vi.json` now use chat-history/device wording for PIN, automatic restore, gap banners, repair status, result metrics, and issue reasons.
+- `apps/uhm-chat/README.md` now records the account-menu PIN entry point and one-button conversation repair UX.
+
+Design decisions:
+
+- Keep normal UI close to a WhatsApp-style recovery mental model: restore available chat history on this device.
+- Do not expose vault/archive/epoch/MLS wording in ordinary PIN or repair copy. Epoch and raw crypto reason remain available only inside the explicit technical details section for debugging.
+- Preserve the previously chosen user-facing repair card shape: one Repair action, inline details, and no retry-mode selection.
+
+Verification:
+
+- `jq empty apps/uhm-chat/src/locales/en.json apps/uhm-chat/src/locales/vi.json` passed.
+- `yarn workspace uhm-chat exec eslint src/features/chat/UhmRecoveryPinDialog.tsx src/features/chat/UhmChannelInfoActions.tsx` passed.
+- `yarn workspace uhm-chat build` passed.
+
+### 2026-06-13 — Production — Safe Cursor and MLS State Repair
+
+Goal: fix scope sync cursor advancement and add a user-driven recovery path for devices whose local MLS group state falls behind the server.
+
+Code changed:
+
+- `packages/ermis-chat-sdk/src/mls_manager.ts` now returns `processedEventCursor` from `_processChannelEvents()` and uses the exact processed `event_id` in both batch sync and per-channel sync.
+- Protocol commit failures that are not safe skips stop the sync page instead of advancing the cursor. Message decrypt failures may advance only after pending snapshots/repair issues are durable.
+- `IndexedDBMlsStorage` stores `ChannelRepairState`, a 60s soft repair lock, and a `saveMlsSyncCheckpoint()` path that writes provider bytes, scope cursors, pending snapshots, and repair state in one `meta` transaction.
+- `repairEncryptedChannel()` adds replay and manual `reset_local_state` modes. Replay gates realtime processing for the MLS scope; reset deletes local group state, external-joins again, keeps plaintext cache and repair issues, and rolls back provider/group marker if external join fails.
+- Replay detects local epoch drift by comparing the current group epoch with failed message/pending snapshot epochs. If local state is behind, the saved cursor is treated as untrusted and replay starts from the membership/MLS-enabled boundary. If still behind, archive repair is attempted for unavailable messages before reset becomes available for the stale live MLS state.
+- Manual repair marks affected message-level issues as `no_archive` when archive epoch listing returns no matching epoch, making missing backup material visible instead of leaving stale decrypt-error reasons.
+- React `useRecoveryPin()` exposes the new encrypted-state repair API.
+- Uhm Channel Info uses the new replay API behind one Repair button and shows reset only as an advanced fallback after replay failure.
+- `e2ee_frontend_guide.md`, SDK README, React README, and Uhm README now document safe cursor semantics and repair/reset behavior.
+
+Design decisions:
+
+- `max_observed_epoch` is diagnostic only because Bellboy does not expose authoritative current channel epoch in scope sync.
+- Reset is manual only. Auto recovery can replay and flush pending snapshots, but it must not delete local group state without user confirmation.
+- No Bellboy API, SQL, or Postman change is needed; the implementation uses existing `scope_sync`, external join, and PIN archive query/upload paths.
+- Non-gated topic repair uses the parent MLS scope for state reset while message/history repair remains filtered to the selected topic timeline.
+
+Verification:
+
+- `npm run build:sdk` passed.
+- `npm run build:react` passed.
+- `yarn workspace uhm-chat build` passed.
+- `yarn workspace @ermis-network/ermis-chat-sdk test:repair` passed 6 tests, including the new same-timestamp cursor/event-id regression.
+- `yarn workspace uhm-chat exec eslint src/features/chat/UhmChannelInfoActions.tsx src/locales/en.json src/locales/vi.json` completed with no TSX errors; locale JSON files are ignored by the repo ESLint config.
 
 ### 2026-05-14 — POC — Chatbox Internal Scroll UI Fix
 
