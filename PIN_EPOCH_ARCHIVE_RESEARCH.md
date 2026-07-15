@@ -1381,6 +1381,35 @@ npm run build
 
 Result: production build passed.
 
+### 2026-07-15 — Production — External SDK and Standalone App Boundary
+
+Goal: create an outsource-safe UHM Chat distribution that keeps live MLS/E2EE while removing the account PIN and remote encrypted-history feature set from the JavaScript/React contract.
+
+Code changed:
+
+- `ermis-chat-monorepo` now has an internal `outsource` branch based on `uhm-chat@974eb5b`.
+- Core SDK removes the PIN/vault/archive API client, runtime manager orchestration, IndexedDB stores, public request/types, channel recovery policy, and archive-backed message repair. Device-local protocol replay/reset remains available.
+- React SDK removes `useRecoveryPin`, PIN components/styles/exports, recovery-policy controls, and archive upload calls.
+- Both packages use `2.1.0-external.1`; React pins the exact core version. External builds disable source maps, and the React tarball no longer publishes `/src`.
+- `uhm-chat-external` is a standalone app repository boundary with exact SDK versions, sanitized UI/locales, `.env.example`, no workspace aliases, and no public OpenMLS glue/declaration copies.
+- The app still uses ordered `connectUser → initialize E2EE → mount chat`, key rotation, external join/sync, encrypted attachments/media, and live state replay/reset.
+
+Design decisions:
+
+- The current OpenMLS WASM binary and its generated glue remain a temporary internal exception. The binary checksum and size are unchanged; `loadOpenMlsWasm()` exposes a narrowed live-only TypeScript view. A user-owned follow-up (`WASM-001`) will replace the artifact.
+- Outsource receives only the standalone app source and compiled npm packages, not this monorepo or SDK TypeScript source.
+- Bellboy, SQL, Postman, and API contracts are unchanged in this phase. `bellboy-external` attachment/base64 work stays blocked until the FE/SDK release is complete.
+- Registry lockfile generation and the app's one-commit Git initialization must wait for a successful npm publish; they are not simulated with tarball locators.
+
+Verification:
+
+- Core SDK and React SDK production builds passed.
+- External contract tests confirmed no high-level encrypted-history exports, declarations, manager methods, policy field, or endpoint strings; attachment and media suites passed.
+- `npm pack` and `scripts/publish-packages.sh --tag external --dry-run` passed with no `/src` or source maps. React depends exactly on core `2.1.0-external.1`.
+- A standalone copy installed both local package tarballs and completed a production build outside the monorepo.
+- OpenMLS WASM SHA-256 remained `2ce2c8b1e726a6c220fa44dfb2913830d82ef7f7ed13321abe830e8a1eeb7109` at 2,494,458 bytes.
+- Real npm publish did not start because `npm whoami` returned `E401 Unauthorized`; no registry package was changed.
+
 ### 2026-06-19 — Production — PIN Settings Restore Diagnostics
 
 Goal: move terminal unavailable-history warnings out of individual Uhm Chat channels and into the account-level Chat history PIN settings dialog.
