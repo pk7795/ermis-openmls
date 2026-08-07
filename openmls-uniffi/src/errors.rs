@@ -19,6 +19,7 @@ pub enum MlsError {
     InvalidState,
     ExternalCommitError,
     InternalError,
+    NoMatchingKeyPackage,
 }
 
 impl fmt::Display for MlsError {
@@ -40,6 +41,7 @@ impl fmt::Display for MlsError {
             MlsError::InvalidState => write!(f, "Invalid state"),
             MlsError::ExternalCommitError => write!(f, "External commit failed"),
             MlsError::InternalError => write!(f, "Internal error"),
+            MlsError::NoMatchingKeyPackage => write!(f, "No matching key package"),
         }
     }
 }

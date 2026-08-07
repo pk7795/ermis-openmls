@@ -192,6 +192,37 @@ fn test_group_creation_and_join() {
 }
 
 #[test]
+fn test_welcome_for_different_provider_returns_typed_no_matching_key_package() {
+    let alice_provider = create_provider();
+    let bob_provider = create_provider();
+    let unrelated_provider = create_provider();
+    let alice = create_identity(alice_provider.clone(), "alice");
+    let bob = create_identity(bob_provider.clone(), "bob");
+    let alice_group = Group::create_with_cid(
+        alice_provider.clone(),
+        alice.clone(),
+        "team:typed_welcome_error".into(),
+    )
+    .unwrap();
+    let add_result = alice_group
+        .add_members(
+            alice_provider.clone(),
+            alice,
+            vec![bob.key_package(bob_provider)],
+        )
+        .unwrap();
+    alice_group.merge_pending_commit(alice_provider).unwrap();
+
+    let result = Group::join_with_welcome(
+        unrelated_provider,
+        add_result.welcome.expect("welcome must be generated"),
+        Some(alice_group.export_ratchet_tree()),
+    );
+
+    assert!(matches!(result, Err(MlsError::NoMatchingKeyPackage)));
+}
+
+#[test]
 fn test_encrypted_messaging() {
     let (alice_provider, alice, chess_club_alice, bob_provider, _, chess_club_bob) =
         create_group_alice_and_bob();

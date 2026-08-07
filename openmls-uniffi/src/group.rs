@@ -14,7 +14,7 @@ use openmls::{
         MlsMessageBodyIn, MlsMessageIn, MlsMessageOut,
         errors::{MessageDecryptionError, SecretTreeError},
     },
-    group::{GroupId, MlsGroup, MlsGroupJoinConfig, StagedWelcome},
+    group::{GroupId, MlsGroup, MlsGroupJoinConfig, StagedWelcome, WelcomeError},
     prelude::{LeafNodeIndex, ProcessMessageError, SenderRatchetConfiguration, ValidationError},
 };
 use openmls_traits::OpenMlsProvider;
@@ -152,7 +152,10 @@ impl Group {
             StagedWelcome::new_from_welcome(&*guard, &config, mls_welcome, ratchet_tree_in)
                 .map_err(|e| {
                     mls_error!("[MLS] join_with_welcome: new_from_welcome failed: {:?}", e);
-                    MlsError::InternalError
+                    match e {
+                        WelcomeError::NoMatchingKeyPackage => MlsError::NoMatchingKeyPackage,
+                        _ => MlsError::InternalError,
+                    }
                 })?
                 .into_group(&*guard)
                 .map_err(|e| {

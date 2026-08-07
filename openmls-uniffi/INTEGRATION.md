@@ -194,6 +194,30 @@ try group.mergePendingCommit(provider: aliceProvider)
 try group.deleteState(provider: aliceProvider)
 ```
 
+### Typed Welcome errors
+
+`Group.joinWithWelcome` exposes `WelcomeError::NoMatchingKeyPackage` as the additive UniFFI
+variant `MlsError.NoMatchingKeyPackage`. Mobile clients must match that enum case rather than
+parsing an error description:
+
+```swift
+do {
+    try Group.joinWithWelcome(provider: provider, welcome: welcome, ratchetTree: tree)
+} catch let error as MlsError {
+    if case .NoMatchingKeyPackage = error {
+        // This Welcome belongs to a KeyPackage from another installation/device.
+        // Advance the durable event cursor and use the external-join fallback.
+    } else {
+        throw error
+    }
+}
+```
+
+Do not delete the current group or retry the same Welcome after this case. Other Welcome errors
+remain `InternalError` until they receive their own typed bridge cases and must not be treated as a
+stale-KeyPackage signal. Append new UDL error variants at the end so existing UniFFI discriminants
+remain stable, then regenerate both the Swift binding and XCFramework with `./build_mobile.sh ios`.
+
 ---
 
 ## 3. Android Integration (Kotlin)

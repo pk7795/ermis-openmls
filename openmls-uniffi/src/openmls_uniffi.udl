@@ -23,6 +23,7 @@ enum MlsError {
     "InvalidState",
     "ExternalCommitError",
     "InternalError",
+    "NoMatchingKeyPackage",
 };
 
 enum MessageType {
