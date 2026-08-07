@@ -5,21 +5,24 @@
 
 use std::{
     collections::HashSet,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use openmls::{
     credentials::BasicCredential,
-    framing::{MlsMessageBodyIn, MlsMessageIn, MlsMessageOut},
+    framing::{
+        MlsMessageBodyIn, MlsMessageIn, MlsMessageOut,
+        errors::{MessageDecryptionError, SecretTreeError},
+    },
     group::{GroupId, MlsGroup, MlsGroupJoinConfig, StagedWelcome},
-    prelude::{LeafNodeIndex, SenderRatchetConfiguration},
+    prelude::{LeafNodeIndex, ProcessMessageError, SenderRatchetConfiguration, ValidationError},
 };
 use openmls_traits::OpenMlsProvider;
 use tls_codec::{Deserialize, Serialize};
 
 use crate::{
     errors::MlsError,
-    identity::{Identity, KeyPackage, CIPHERSUITE},
+    identity::{CIPHERSUITE, Identity, KeyPackage},
     provider::Provider,
     types::*,
 };
@@ -31,6 +34,13 @@ pub struct Group {
 }
 
 impl Group {
+    fn lock_group(&self) -> MutexGuard<'_, MlsGroup> {
+        self.mls_group.lock().unwrap_or_else(|poisoned| {
+            mls_error!("[MLS] recovering a poisoned group mutex");
+            poisoned.into_inner()
+        })
+    }
+
     // ========================================================================
     // Creation & Joining
     // ========================================================================
@@ -93,7 +103,7 @@ impl Group {
     /// the updated ratchet/secret tree state. Without this, a Provider restore
     /// would load stale ratchet state, causing SecretReuseError.
     pub fn save_state(&self, provider: Arc<Provider>) -> Result<(), MlsError> {
-        let group = self.mls_group.lock().unwrap();
+        let group = self.lock_group();
         let prov_guard = provider.lock();
         group
             .store(prov_guard.storage())
@@ -106,7 +116,7 @@ impl Group {
     /// stale group state so a later re-add with the same CID can join from a
     /// fresh Welcome without colliding with old provider records.
     pub fn delete_state(&self, provider: Arc<Provider>) -> Result<(), MlsError> {
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let prov_guard = provider.lock();
         group.delete(prov_guard.storage()).map_err(|e| {
             mls_error!("[MLS] delete_state FAILED: {:?}", e);
@@ -161,26 +171,26 @@ impl Group {
 
     /// Get the CID (group_id as string)
     pub fn cid(&self) -> Result<String, MlsError> {
-        let group = self.mls_group.lock().unwrap();
+        let group = self.lock_group();
         let group_id = group.group_id();
         String::from_utf8(group_id.as_slice().to_vec()).map_err(|_| MlsError::InvalidCid)
     }
 
     /// Get the raw group_id bytes
     pub fn group_id(&self) -> Vec<u8> {
-        let group = self.mls_group.lock().unwrap();
+        let group = self.lock_group();
         group.group_id().as_slice().to_vec()
     }
 
     /// Get current epoch number
     pub fn epoch(&self) -> u64 {
-        let group = self.mls_group.lock().unwrap();
+        let group = self.lock_group();
         group.epoch().as_u64()
     }
 
     /// Get all members in the group
     pub fn members(&self) -> Vec<MemberInfo> {
-        let group = self.mls_group.lock().unwrap();
+        let group = self.lock_group();
         group
             .members()
             .map(|m| {
@@ -213,25 +223,25 @@ impl Group {
 
     /// Get the local member's leaf index
     pub fn own_leaf_index(&self) -> u32 {
-        let group = self.mls_group.lock().unwrap();
+        let group = self.lock_group();
         group.own_leaf_index().u32()
     }
 
     /// Check if the group is in operational state
     pub fn is_operational(&self) -> bool {
-        let group = self.mls_group.lock().unwrap();
+        let group = self.lock_group();
         group.is_active()
     }
 
     /// Check if there's a pending commit
     pub fn has_pending_commit(&self) -> bool {
-        let group = self.mls_group.lock().unwrap();
+        let group = self.lock_group();
         group.pending_commit().is_some()
     }
 
     /// Export the ratchet tree
     pub fn export_ratchet_tree(&self) -> Arc<RatchetTree> {
-        let group = self.mls_group.lock().unwrap();
+        let group = self.lock_group();
         Arc::new(RatchetTree {
             inner: group.export_ratchet_tree().into(),
         })
@@ -244,7 +254,7 @@ impl Group {
         sender: Arc<Identity>,
         with_ratchet_tree: bool,
     ) -> Result<Vec<u8>, MlsError> {
-        let group = self.mls_group.lock().unwrap();
+        let group = self.lock_group();
         let prov_guard = provider.lock();
         let group_info = group
             .export_group_info(prov_guard.crypto(), &sender.keypair, with_ratchet_tree)
@@ -265,7 +275,7 @@ impl Group {
         context: Vec<u8>,
         key_length: u32,
     ) -> Result<Vec<u8>, MlsError> {
-        let group = self.mls_group.lock().unwrap();
+        let group = self.lock_group();
         let prov_guard = provider.lock();
         group
             .export_secret(prov_guard.crypto(), &label, &context, key_length as usize)
@@ -283,7 +293,7 @@ impl Group {
         sender: Arc<Identity>,
         plaintext: Vec<u8>,
     ) -> Result<Vec<u8>, MlsError> {
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let prov_guard = provider.lock();
         let msg_out = group
             .create_message(&*prov_guard, &sender.keypair, &plaintext)
@@ -297,7 +307,7 @@ impl Group {
 
     /// Set Additional Authenticated Data (AAD) for the next outgoing message
     pub fn set_aad(&self, aad: Vec<u8>) {
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         group.set_aad(aad);
     }
 
@@ -310,7 +320,7 @@ impl Group {
         aad: Vec<u8>,
     ) -> Result<Vec<u8>, MlsError> {
         {
-            let mut group = self.mls_group.lock().unwrap();
+            let mut group = self.lock_group();
             group.set_aad(aad);
         }
         self.create_message(provider, sender, plaintext)
@@ -334,7 +344,7 @@ impl Group {
             MlsError::DeserializationError
         })?;
 
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let prov_guard = provider.lock();
 
         let processed_msg = match mls_msg.extract() {
@@ -345,7 +355,7 @@ impl Group {
                         "[MLS] process_message: PublicMessage processing FAILED: {:?}",
                         e
                     );
-                    MlsError::InvalidMessage
+                    map_process_message_error(e)
                 })?
             }
             MlsMessageBodyIn::PrivateMessage(msg) => {
@@ -355,19 +365,25 @@ impl Group {
                         "[MLS] process_message: PrivateMessage processing FAILED: {:?}",
                         e
                     );
-                    MlsError::InvalidMessage
+                    map_process_message_error(e)
                 })?
             }
             MlsMessageBodyIn::Welcome(_) => {
-                mls_debug!("[MLS] process_message: received Welcome — wrong message type for process_message");
+                mls_debug!(
+                    "[MLS] process_message: received Welcome — wrong message type for process_message"
+                );
                 return Err(MlsError::InvalidMessage);
             }
             MlsMessageBodyIn::GroupInfo(_) => {
-                mls_debug!("[MLS] process_message: received GroupInfo — wrong message type for process_message");
+                mls_debug!(
+                    "[MLS] process_message: received GroupInfo — wrong message type for process_message"
+                );
                 return Err(MlsError::InvalidMessage);
             }
             MlsMessageBodyIn::KeyPackage(_) => {
-                mls_debug!("[MLS] process_message: received KeyPackage — wrong message type for process_message");
+                mls_debug!(
+                    "[MLS] process_message: received KeyPackage — wrong message type for process_message"
+                );
                 return Err(MlsError::InvalidMessage);
             }
         };
@@ -476,7 +492,7 @@ impl Group {
         sender: Arc<Identity>,
         new_member: Arc<KeyPackage>,
     ) -> Result<ProposalMessage, MlsError> {
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let prov_guard = provider.lock();
 
         let (proposal_msg, proposal_ref) = group
@@ -509,7 +525,7 @@ impl Group {
             return Err(MlsError::InvalidState);
         }
 
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let prov_guard = provider.lock();
 
         let mut proposals = Vec::with_capacity(device_key_packages.len());
@@ -539,7 +555,7 @@ impl Group {
         sender: Arc<Identity>,
         member_index: u32,
     ) -> Result<ProposalMessage, MlsError> {
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let prov_guard = provider.lock();
         let leaf_index = LeafNodeIndex::new(member_index);
 
@@ -567,7 +583,7 @@ impl Group {
         sender: Arc<Identity>,
         user_id: String,
     ) -> Result<ProposalMessage, MlsError> {
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let prov_guard = provider.lock();
 
         let user_id_bytes: Vec<u8> = user_id.bytes().collect();
@@ -609,7 +625,7 @@ impl Group {
             return Err(MlsError::MemberNotFound);
         }
 
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let prov_guard = provider.lock();
 
         let mut proposals = Vec::with_capacity(member_indices.len());
@@ -639,7 +655,7 @@ impl Group {
         provider: Arc<Provider>,
         sender: Arc<Identity>,
     ) -> Result<ProposalMessage, MlsError> {
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let prov_guard = provider.lock();
 
         let (proposal_msg, proposal_ref) = group
@@ -671,7 +687,7 @@ impl Group {
         provider: Arc<Provider>,
         sender: Arc<Identity>,
     ) -> Result<Vec<u8>, MlsError> {
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let prov_guard = provider.lock();
 
         let proposal_msg = group
@@ -691,13 +707,13 @@ impl Group {
 
     /// Get the number of pending proposals
     pub fn pending_proposals_count(&self) -> u64 {
-        let group = self.mls_group.lock().unwrap();
+        let group = self.lock_group();
         group.pending_proposals().count() as u64
     }
 
     /// Clear all pending proposals
     pub fn clear_pending_proposals(&self, provider: Arc<Provider>) -> Result<(), MlsError> {
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let prov_guard = provider.lock();
         group
             .clear_pending_proposals(prov_guard.storage())
@@ -714,7 +730,7 @@ impl Group {
         provider: Arc<Provider>,
         sender: Arc<Identity>,
     ) -> Result<CommitBundle, MlsError> {
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let prov_guard = provider.lock();
 
         // Auto-clear stale pending commit from a previous failed operation
@@ -740,7 +756,7 @@ impl Group {
 
     /// Merge the pending commit after DS confirmation
     pub fn merge_pending_commit(&self, provider: Arc<Provider>) -> Result<(), MlsError> {
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let mut prov_guard = provider.lock();
         group.merge_pending_commit(&mut *prov_guard).map_err(|e| {
             mls_error!("[MLS] merge_pending_commit FAILED: {:?}", e);
@@ -750,7 +766,7 @@ impl Group {
 
     /// Discard the pending commit (rollback)
     pub fn clear_pending_commit(&self, provider: Arc<Provider>) -> Result<(), MlsError> {
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let prov_guard = provider.lock();
         group
             .clear_pending_commit(prov_guard.storage())
@@ -764,7 +780,7 @@ impl Group {
         sender: Arc<Identity>,
         new_members: Vec<Arc<KeyPackage>>,
     ) -> Result<CommitBundle, MlsError> {
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let prov_guard = provider.lock();
 
         // Auto-clear stale pending commit from a previous failed operation
@@ -850,7 +866,7 @@ impl Group {
         sender: Arc<Identity>,
         member_indices: Vec<u32>,
     ) -> Result<CommitBundle, MlsError> {
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let prov_guard = provider.lock();
 
         // Auto-clear stale pending commit from a previous failed operation
@@ -983,15 +999,20 @@ impl Group {
         add_members: Vec<Arc<KeyPackage>>,
         force_self_update: bool,
     ) -> Result<CommitBundle, MlsError> {
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let prov_guard = provider.lock();
 
         if group.pending_commit().is_some() {
             mls_debug!("[MLS] commit_group_changes: clearing stale pending commit");
-            group.clear_pending_commit(prov_guard.storage()).map_err(|e| {
-                mls_error!("[MLS] commit_group_changes: clear_pending_commit FAILED: {:?}", e);
-                MlsError::InternalError
-            })?;
+            group
+                .clear_pending_commit(prov_guard.storage())
+                .map_err(|e| {
+                    mls_error!(
+                        "[MLS] commit_group_changes: clear_pending_commit FAILED: {:?}",
+                        e
+                    );
+                    MlsError::InternalError
+                })?;
         }
 
         let own_leaf_index = group.own_leaf_index().u32();
@@ -1048,7 +1069,12 @@ impl Group {
                 mls_error!("[MLS] commit_group_changes: load_psks FAILED: {:?}", e);
                 MlsError::InternalError
             })?
-            .build(prov_guard.rand(), prov_guard.crypto(), &sender.keypair, |_| true)
+            .build(
+                prov_guard.rand(),
+                prov_guard.crypto(),
+                &sender.keypair,
+                |_| true,
+            )
             .map_err(|e| {
                 mls_error!("[MLS] commit_group_changes: build FAILED: {:?}", e);
                 MlsError::InternalError
@@ -1103,7 +1129,7 @@ impl Group {
         provider: Arc<Provider>,
         sender: Arc<Identity>,
     ) -> Result<CommitBundle, MlsError> {
-        let mut group = self.mls_group.lock().unwrap();
+        let mut group = self.lock_group();
         let prov_guard = provider.lock();
 
         let bundle = group
@@ -1119,6 +1145,16 @@ impl Group {
             .map(|w| MlsMessageOut::from_welcome(w, openmls::prelude::ProtocolVersion::Mls10));
 
         serialize_commit_bundle(&commit_msg, welcome_msg.as_ref(), group_info)
+    }
+}
+
+fn map_process_message_error<StorageError>(error: ProcessMessageError<StorageError>) -> MlsError {
+    match error {
+        ProcessMessageError::StorageError(_) => MlsError::StorageError,
+        ProcessMessageError::ValidationError(ValidationError::UnableToDecrypt(
+            MessageDecryptionError::SecretTreeError(SecretTreeError::SecretReuseError),
+        )) => MlsError::MessageAlreadyConsumed,
+        _ => MlsError::InvalidMessage,
     }
 }
 

@@ -10,6 +10,7 @@ pub enum MlsError {
     GroupNotOperational,
     MemberNotFound,
     InvalidMessage,
+    MessageAlreadyConsumed,
     NoWelcome,
     InvalidCid,
     StorageError,
@@ -28,6 +29,9 @@ impl fmt::Display for MlsError {
             MlsError::GroupNotOperational => write!(f, "Group is not in operational state"),
             MlsError::MemberNotFound => write!(f, "Member not found"),
             MlsError::InvalidMessage => write!(f, "Invalid message"),
+            MlsError::MessageAlreadyConsumed => {
+                write!(f, "Message ratchet secret was already consumed")
+            }
             MlsError::NoWelcome => write!(f, "Expected welcome message but none was generated"),
             MlsError::InvalidCid => write!(f, "Invalid CID format"),
             MlsError::StorageError => write!(f, "Storage operation failed"),

@@ -360,7 +360,11 @@ fn test_commit_member_removals_wrapper() {
 
     let epoch_before = alice_group.epoch();
     let composite = alice_group
-        .commit_member_removals(alice_provider.clone(), alice.clone(), vec!["bob".to_string()])
+        .commit_member_removals(
+            alice_provider.clone(),
+            alice.clone(),
+            vec!["bob".to_string()],
+        )
         .unwrap();
     assert!(composite.welcome.is_none());
 

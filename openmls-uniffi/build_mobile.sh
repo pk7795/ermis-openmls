@@ -27,6 +27,7 @@ IOS_TARGETS=(
     "aarch64-apple-ios"          # Physical iPhone/iPad
     "aarch64-apple-ios-sim"      # Simulator on Apple Silicon
 )
+IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-15.0}"
 
 # Android targets (requires NDK)
 ANDROID_TARGETS=(
@@ -57,8 +58,9 @@ build_ios() {
     mkdir -p "$OUT_DIR/ios"
 
     for target in "${IOS_TARGETS[@]}"; do
-        log "Building for $target..."
-        cargo build -p openmls-uniffi --release --target "$target"
+        log "Building for $target (minimum iOS $IOS_DEPLOYMENT_TARGET)..."
+        IPHONEOS_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET" \
+            cargo build -p openmls-uniffi --release --target "$target"
         cp "$PROJECT_ROOT/target/$target/release/libopenmls_uniffi.a" "$OUT_DIR/ios/libopenmls_uniffi-${target}.a"
         log "  ✓ $target built"
     done
@@ -185,6 +187,28 @@ patch_kotlin_bindings() {
     log "✓ Kotlin bindings patched"
 }
 
+# UniFFI 0.28 emits the one-time initialization result as a mutable global.
+# Swift 6's strict concurrency checks reject that declaration even though the
+# value is initialized once and never mutated. Keep the generated binding
+# compatible with current Xcode toolchains until the upstream template uses
+# an immutable binding.
+patch_swift_bindings() {
+    local swift_file="$OUT_DIR/swift/openmls_uniffi.swift"
+    log "Patching Swift bindings for strict concurrency compatibility..."
+
+    perl -i -pe \
+        's/^private var initializationResult: InitializationResult = \{/private let initializationResult: InitializationResult = {/' \
+        "$swift_file"
+    perl -i -pe 's/[ \t]+$//' "$swift_file"
+
+    if ! grep -q '^private let initializationResult: InitializationResult = {' "$swift_file"; then
+        error "Unable to patch Swift initializationResult declaration"
+        exit 1
+    fi
+
+    log "  ✓ Patched: $(basename "$swift_file")"
+}
+
 generate_bindings() {
     log "========================================="
     log "Generating bindings..."
@@ -207,6 +231,8 @@ generate_bindings() {
         --library "$PROJECT_ROOT/target/release/libopenmls_uniffi.dylib" \
         --language kotlin \
         --out-dir "$OUT_DIR/kotlin"
+
+    patch_swift_bindings
 
     # Post-process: fix missing public modifiers in generated Kotlin
     patch_kotlin_bindings

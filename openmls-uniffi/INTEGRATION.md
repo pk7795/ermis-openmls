@@ -8,6 +8,9 @@ cd openmls-uniffi
 # Build iOS (device + simulator + XCFramework)
 ./build_mobile.sh ios
 
+# Optional override; the default minimum is iOS 15.0.
+IOS_DEPLOYMENT_TARGET=16.0 ./build_mobile.sh ios
+
 # Build Android (export ANDROID_NDK_HOME first)
 export ANDROID_NDK_HOME=$HOME/Library/Android/sdk/ndk/<version>
 ./build_mobile.sh android
@@ -15,6 +18,10 @@ export ANDROID_NDK_HOME=$HOME/Library/Android/sdk/ndk/<version>
 # Generate bindings only (Swift/Kotlin)
 ./build_mobile.sh bindings
 ```
+
+The build script passes the deployment target into every Rust/C dependency in both device and
+Apple Silicon simulator archives. This prevents a library built with a newer Xcode SDK from
+silently inheriting that SDK's current OS version as its minimum deployment target.
 
 Output is located in `openmls-uniffi/out/`:
 ```
