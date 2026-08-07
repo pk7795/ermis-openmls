@@ -209,6 +209,19 @@ patch_swift_bindings() {
     log "  ✓ Patched: $(basename "$swift_file")"
 }
 
+# UniFFI's generated C header may contain trailing spaces and a trailing blank
+# line that vary between generator invocations. Normalize those bytes so an
+# XCFramework rebuilt from the same source revision produces stable checksums.
+normalize_c_header() {
+    local header_file="$OUT_DIR/swift/openmls_uniffiFFI.h"
+    log "Normalizing generated C header for reproducible release checksums..."
+
+    perl -i -pe 's/[ \t]+$//' "$header_file"
+    perl -0pi -e 's/\s+\z/\n/' "$header_file"
+
+    log "  ✓ Normalized: $(basename "$header_file")"
+}
+
 generate_bindings() {
     log "========================================="
     log "Generating bindings..."
@@ -233,6 +246,7 @@ generate_bindings() {
         --out-dir "$OUT_DIR/kotlin"
 
     patch_swift_bindings
+    normalize_c_header
 
     # Post-process: fix missing public modifiers in generated Kotlin
     patch_kotlin_bindings

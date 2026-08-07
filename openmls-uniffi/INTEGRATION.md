@@ -23,6 +23,10 @@ The build script passes the deployment target into every Rust/C dependency in bo
 Apple Silicon simulator archives. This prevents a library built with a newer Xcode SDK from
 silently inheriting that SDK's current OS version as its minimum deployment target.
 
+The generated Swift binding and C header are normalized before packaging. Rebuilding from the
+same OpenMLS source revision therefore produces stable release checksums for the Swift source,
+headers, and static libraries committed by `open-mls-ios`.
+
 Output is located in `openmls-uniffi/out/`:
 ```
 out/
