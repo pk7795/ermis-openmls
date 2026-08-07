@@ -335,6 +335,25 @@ impl Group {
         provider: Arc<Provider>,
         msg: Vec<u8>,
     ) -> Result<ProcessedMessage, MlsError> {
+        self.process_message_with_secret_persistence(provider, msg, true)
+    }
+
+    /// Process an incoming application message while keeping the durable receiver ratchet at its
+    /// previous state. The caller must persist its plaintext first and then call `save_state`.
+    pub fn process_message_deferred(
+        &self,
+        provider: Arc<Provider>,
+        msg: Vec<u8>,
+    ) -> Result<ProcessedMessage, MlsError> {
+        self.process_message_with_secret_persistence(provider, msg, false)
+    }
+
+    fn process_message_with_secret_persistence(
+        &self,
+        provider: Arc<Provider>,
+        msg: Vec<u8>,
+        persist_message_secrets: bool,
+    ) -> Result<ProcessedMessage, MlsError> {
         mls_debug!(
             "[MLS] process_message: msg_len={}, group_epoch={}",
             msg.len(),
@@ -353,7 +372,12 @@ impl Group {
         let processed_msg = match mls_msg.extract() {
             MlsMessageBodyIn::PublicMessage(msg) => {
                 mls_debug!("[MLS] process_message: msg_type=PublicMessage");
-                group.process_message(&*prov_guard, msg).map_err(|e| {
+                let result = if persist_message_secrets {
+                    group.process_message(&*prov_guard, msg)
+                } else {
+                    group.process_message_deferred(&*prov_guard, msg)
+                };
+                result.map_err(|e| {
                     mls_error!(
                         "[MLS] process_message: PublicMessage processing FAILED: {:?}",
                         e
@@ -363,7 +387,12 @@ impl Group {
             }
             MlsMessageBodyIn::PrivateMessage(msg) => {
                 mls_debug!("[MLS] process_message: msg_type=PrivateMessage");
-                group.process_message(&*prov_guard, msg).map_err(|e| {
+                let result = if persist_message_secrets {
+                    group.process_message(&*prov_guard, msg)
+                } else {
+                    group.process_message_deferred(&*prov_guard, msg)
+                };
+                result.map_err(|e| {
                     mls_error!(
                         "[MLS] process_message: PrivateMessage processing FAILED: {:?}",
                         e
@@ -405,20 +434,10 @@ impl Group {
 
         match processed_msg.into_content() {
             openmls::framing::ProcessedMessageContent::ApplicationMessage(app_msg) => {
-                // NOTE: Ratchet state is advanced in-memory but NOT persisted here.
-                // The caller MUST call `save_state()` after storing the decrypted
-                // plaintext in their app database. This ensures that if the app
-                // crashes before saving plaintext, the message can be re-decrypted
-                // on next launch (ratchet key still in DB).
-                //
-                // Correct flow:
-                //   1. plaintext = process_message(ciphertext)
-                //   2. app_db.save(plaintext)        ← persist plaintext first
-                //   3. group.save_state(provider)    ← then advance ratchet in DB
-
                 mls_debug!(
-                    "[MLS] process_message: OK ApplicationMessage, epoch={}",
-                    epoch
+                    "[MLS] process_message: OK ApplicationMessage, epoch={}, deferred={}",
+                    epoch,
+                    !persist_message_secrets
                 );
                 Ok(ProcessedMessage {
                     message_type: MessageType::ApplicationMessage,

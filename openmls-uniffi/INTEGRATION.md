@@ -116,6 +116,19 @@ if processed.messageType == .applicationMessage,
     print("Received: \(text)")  // "Hello, Bob!"
 }
 
+// Apps that keep plaintext and MLS state in separate databases can instead use the deferred
+// receiver path. It advances only the in-memory ratchet, allowing the ciphertext to be replayed
+// after a crash until the explicit save succeeds.
+let deferred = try bobGroup.processMessageDeferred(
+    provider: bobProvider,
+    msg: ciphertext
+)
+try appDatabase.save(deferred.content) // durable plaintext first
+try bobGroup.saveState(provider: bobProvider) // then persist the consumed receiver secret
+
+// Do not use the deferred API without the immediate save above. The normal processMessage API
+// remains the safer default because it eagerly persists forward-secret ratchet deletion.
+
 // === SEND WITH AAD (metadata) ===
 let aad = "{\"sender\":\"alice\"}".data(using: .utf8)!
 let ct = try group.createMessageWithAad(

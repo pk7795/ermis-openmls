@@ -173,6 +173,9 @@ interface Group {
     ProcessedMessage process_message(Provider provider, bytes msg);
 
     [Throws=MlsError]
+    ProcessedMessage process_message_deferred(Provider provider, bytes msg);
+
+    [Throws=MlsError]
     bytes process_message_raw(Provider provider, bytes msg);
 
     // Proposals

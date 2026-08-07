@@ -121,7 +121,37 @@ impl MlsGroup {
         provider: &Provider,
         message: impl Into<ProtocolMessage>,
     ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
-        let unverified_message = self.unprotect_message(provider, message)?;
+        self.process_message_with_secret_persistence(provider, message, true)
+    }
+
+    /// Processes a message without persisting the modified message-secret tree.
+    ///
+    /// This is intended for clients that must durably store the decrypted application payload
+    /// before advancing the receiver ratchet in a separate database. The caller must persist the
+    /// group immediately after its application transaction succeeds. Dropping the mutated group
+    /// without saving restores the last durable ratchet state on reload.
+    ///
+    /// The regular [`Self::process_message`] remains the default because eagerly deleting used
+    /// ratchet secrets provides the strongest forward-secrecy guarantee.
+    pub fn process_message_deferred<Provider: OpenMlsProvider>(
+        &mut self,
+        provider: &Provider,
+        message: impl Into<ProtocolMessage>,
+    ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
+        self.process_message_with_secret_persistence(provider, message, false)
+    }
+
+    fn process_message_with_secret_persistence<Provider: OpenMlsProvider>(
+        &mut self,
+        provider: &Provider,
+        message: impl Into<ProtocolMessage>,
+        persist_message_secrets: bool,
+    ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
+        let unverified_message = self.unprotect_message_with_secret_persistence(
+            provider,
+            message,
+            persist_message_secrets,
+        )?;
 
         // Check if the commit contains AppDataUpdate proposals - if so, the caller
         // must use process_unverified_message_with_app_data_updates instead
@@ -150,6 +180,15 @@ impl MlsGroup {
         &mut self,
         provider: &Provider,
         message: impl Into<ProtocolMessage>,
+    ) -> Result<UnverifiedMessage, ProcessMessageError<Provider::StorageError>> {
+        self.unprotect_message_with_secret_persistence(provider, message, true)
+    }
+
+    fn unprotect_message_with_secret_persistence<Provider: OpenMlsProvider>(
+        &mut self,
+        provider: &Provider,
+        message: impl Into<ProtocolMessage>,
+        persist_message_secrets: bool,
     ) -> Result<UnverifiedMessage, ProcessMessageError<Provider::StorageError>> {
         // Make sure we are still a member of the group
         if !self.is_active() {
@@ -187,7 +226,7 @@ impl MlsGroup {
             self.decrypt_message(provider.crypto(), message, &sender_ratchet_configuration)?;
 
         // Persist the secret tree if it was modified to ensure forward secrecy
-        if will_modify_secret_tree {
+        if will_modify_secret_tree && persist_message_secrets {
             provider
                 .storage()
                 .write_message_secrets(self.group_id(), &self.message_secrets_store)
