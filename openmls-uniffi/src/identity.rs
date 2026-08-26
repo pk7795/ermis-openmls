@@ -1,188 +1,86 @@
-//! Identity and KeyPackage management for UniFFI bindings
+//! UniFFI adapters for identities and key packages.
 
 use std::sync::Arc;
 
-use openmls_traits::storage::StorageProvider;
-
-use openmls::{
-    credentials::{BasicCredential, CredentialWithKey},
-    key_packages::KeyPackage as OpenMlsKeyPackage,
-    prelude::SignatureScheme,
-};
-use openmls_basic_credential::SignatureKeyPair;
-use openmls_traits::OpenMlsProvider;
-use tls_codec::{Deserialize, Serialize};
-
 use crate::{errors::MlsError, provider::Provider};
 
-/// The ciphersuite used for all operations
-pub(crate) static CIPHERSUITE: openmls_traits::types::Ciphersuite =
-    openmls_traits::types::Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519;
-
-/// Represents a user's MLS identity with credentials and signing keys
 pub struct Identity {
-    pub(crate) credential_with_key: CredentialWithKey,
-    pub(crate) keypair: SignatureKeyPair,
-    pub(crate) user_id: String,
+    inner: openmls_bindings_core::Identity,
 }
 
 impl Identity {
-    /// Create a new identity for a user
     pub fn new(provider: Arc<Provider>, user_id: String) -> Result<Self, MlsError> {
-        let signature_scheme = SignatureScheme::ED25519;
-        let identity_bytes: Vec<u8> = user_id.bytes().collect();
-        let credential = BasicCredential::new(identity_bytes);
-        let keypair = SignatureKeyPair::new(signature_scheme).map_err(|_| MlsError::CryptoError)?;
-
-        let guard = provider.lock();
-        keypair
-            .store(guard.storage())
-            .map_err(|_| MlsError::StorageError)?;
-
-        let credential_with_key = CredentialWithKey {
-            credential: credential.into(),
-            signature_key: keypair.public().into(),
-        };
-
-        Ok(Identity {
-            credential_with_key,
-            keypair,
-            user_id,
+        Ok(Self {
+            inner: openmls_bindings_core::Identity::new(provider.core(), user_id)
+                .map_err(MlsError::from_core)?,
         })
     }
 
-    /// Get the user_id from this identity
     pub fn user_id(&self) -> String {
-        self.user_id.clone()
+        self.inner.user_id()
     }
 
-    /// Generate a single key package for this identity
     pub fn key_package(&self, provider: Arc<Provider>) -> Arc<KeyPackage> {
-        let guard = provider.lock();
         Arc::new(KeyPackage {
-            inner: OpenMlsKeyPackage::builder()
-                .build(
-                    CIPHERSUITE,
-                    &*guard,
-                    &self.keypair,
-                    self.credential_with_key.clone(),
-                )
-                .unwrap()
-                .key_package()
-                .clone(),
+            inner: self.inner.key_package(provider.core()),
         })
     }
 
-    /// Generate multiple key packages
     pub fn key_packages(&self, provider: Arc<Provider>, count: u32) -> Vec<Arc<KeyPackage>> {
-        (0..count)
-            .map(|_| self.key_package(provider.clone()))
+        self.inner
+            .key_packages(provider.core(), count)
+            .into_iter()
+            .map(|inner| Arc::new(KeyPackage { inner }))
             .collect()
     }
 
-    /// Serialize identity for storage
     pub fn to_bytes(&self) -> Result<Vec<u8>, MlsError> {
-        let user_id_bytes = self.user_id.as_bytes();
-        let keypair_bytes = self
-            .keypair
-            .tls_serialize_detached()
-            .map_err(|_| MlsError::SerializationError)?;
-
-        let mut result = Vec::new();
-        result.extend_from_slice(&(user_id_bytes.len() as u32).to_be_bytes());
-        result.extend_from_slice(user_id_bytes);
-        result.extend_from_slice(&keypair_bytes);
-
-        Ok(result)
+        self.inner.to_bytes().map_err(MlsError::from_core)
     }
 
-    /// Restore identity from bytes
     pub fn from_bytes(provider: Arc<Provider>, data: Vec<u8>) -> Result<Self, MlsError> {
-        if data.len() < 4 {
-            return Err(MlsError::DeserializationError);
-        }
-
-        let user_id_len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        if data.len() < 4 + user_id_len {
-            return Err(MlsError::DeserializationError);
-        }
-
-        let user_id = String::from_utf8(data[4..4 + user_id_len].to_vec())
-            .map_err(|_| MlsError::DeserializationError)?;
-
-        let mut keypair_slice = &data[4 + user_id_len..];
-        let keypair = SignatureKeyPair::tls_deserialize(&mut keypair_slice)
-            .map_err(|_| MlsError::DeserializationError)?;
-
-        let guard = provider.lock();
-        // Delete any existing entry first — SqliteStorageProvider uses INSERT
-        // (not INSERT OR REPLACE), so re-storing the same public key would
-        // violate the UNIQUE constraint.
-        let _ = guard
-            .storage()
-            .delete_signature_key_pair::<openmls_basic_credential::StorageId>(&keypair.id());
-        keypair
-            .store(guard.storage())
-            .map_err(|_| MlsError::StorageError)?;
-
-        let identity_bytes: Vec<u8> = user_id.bytes().collect();
-        let credential = BasicCredential::new(identity_bytes);
-
-        let credential_with_key = CredentialWithKey {
-            credential: credential.into(),
-            signature_key: keypair.public().into(),
-        };
-
-        Ok(Identity {
-            credential_with_key,
-            keypair,
-            user_id,
+        Ok(Self {
+            inner: openmls_bindings_core::Identity::from_bytes(provider.core(), data)
+                .map_err(MlsError::from_core)?,
         })
+    }
+
+    pub(crate) fn core(&self) -> &openmls_bindings_core::Identity {
+        &self.inner
     }
 }
 
-/// A KeyPackage for joining groups
 pub struct KeyPackage {
-    pub(crate) inner: OpenMlsKeyPackage,
+    inner: openmls_bindings_core::KeyPackage,
 }
 
 impl KeyPackage {
-    /// Serialize this KeyPackage to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
-        self.inner.tls_serialize_detached().unwrap()
+        self.inner.to_bytes()
     }
 
-    /// Deserialize a KeyPackage from bytes
     pub fn from_bytes(data: Vec<u8>) -> Result<Self, MlsError> {
-        let mut s = data.as_slice();
-        let kp_in = openmls::key_packages::KeyPackageIn::tls_deserialize(&mut s)
-            .map_err(|_| MlsError::DeserializationError)?;
-        let kp = kp_in
-            .validate(
-                &openmls_rust_crypto::RustCrypto::default(),
-                openmls::prelude::ProtocolVersion::Mls10,
-            )
-            .map_err(|_| MlsError::DeserializationError)?;
-        Ok(KeyPackage { inner: kp })
+        Ok(Self {
+            inner: openmls_bindings_core::KeyPackage::from_bytes(data)
+                .map_err(MlsError::from_core)?,
+        })
     }
 
-    /// Get the hash reference of this key package
     pub fn hash_ref(&self, provider: Arc<Provider>) -> Result<Vec<u8>, MlsError> {
-        let guard = provider.lock();
-        let hash_ref = self
-            .inner
-            .hash_ref(guard.crypto())
-            .map_err(|_| MlsError::CryptoError)?;
-        Ok(hash_ref.as_slice().to_vec())
+        self.inner
+            .hash_ref(provider.core())
+            .map_err(MlsError::from_core)
+    }
+
+    pub(crate) fn core(&self) -> &openmls_bindings_core::KeyPackage {
+        &self.inner
+    }
+
+    pub(crate) fn clone_core(&self) -> openmls_bindings_core::KeyPackage {
+        self.inner.clone()
     }
 }
 
-/// Validate raw key package bytes without constructing a KeyPackage object.
-///
-/// Performs full validation: TLS deserialization, signature verification,
-/// protocol version check, lifetime check, init_key ≠ encryption_key.
-///
-/// Returns `true` if the KeyPackage is valid, `false` otherwise.
 pub fn validate_key_package_bytes(data: Vec<u8>) -> bool {
-    KeyPackage::from_bytes(data).is_ok()
+    openmls_bindings_core::validate_key_package_bytes(data)
 }

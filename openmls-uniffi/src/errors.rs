@@ -49,6 +49,24 @@ impl fmt::Display for MlsError {
 impl std::error::Error for MlsError {}
 
 impl MlsError {
+    pub(crate) fn from_core(error: openmls_bindings_core::MlsError) -> Self {
+        match error {
+            openmls_bindings_core::MlsError::SerializationError => Self::SerializationError,
+            openmls_bindings_core::MlsError::DeserializationError => Self::DeserializationError,
+            openmls_bindings_core::MlsError::MemberNotFound => Self::MemberNotFound,
+            openmls_bindings_core::MlsError::InvalidMessage => Self::InvalidMessage,
+            openmls_bindings_core::MlsError::MessageAlreadyConsumed => Self::MessageAlreadyConsumed,
+            openmls_bindings_core::MlsError::InvalidCid => Self::InvalidCid,
+            openmls_bindings_core::MlsError::StorageError => Self::StorageError,
+            openmls_bindings_core::MlsError::GroupNotFound => Self::GroupNotFound,
+            openmls_bindings_core::MlsError::CryptoError => Self::CryptoError,
+            openmls_bindings_core::MlsError::InvalidState => Self::InvalidState,
+            openmls_bindings_core::MlsError::ExternalCommitError => Self::ExternalCommitError,
+            openmls_bindings_core::MlsError::InternalError => Self::InternalError,
+            openmls_bindings_core::MlsError::NoMatchingKeyPackage => Self::NoMatchingKeyPackage,
+        }
+    }
+
     pub fn serialization(_msg: &str) -> Self {
         MlsError::SerializationError
     }

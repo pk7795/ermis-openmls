@@ -1,0 +1,14 @@
+name: openmls_flutter
+description: OpenMLS Flutter bindings backed by a shared Rust core and Native Assets.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ">=3.10.0 <4.0.0"
+
+dependencies:
+  flutter_rust_bridge: 2.13.0
+  flutter_rust_bridge_hooks: 2.13.0
+
+dev_dependencies:
+  lints: ^6.0.0

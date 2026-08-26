@@ -3,6 +3,8 @@
 //! This crate mirrors the API surface of `openmls-wasm` but uses Mozilla UniFFI
 //! to generate native Swift and Kotlin bindings instead of wasm-bindgen.
 
+#![allow(clippy::empty_line_after_doc_comments)] // Generated UniFFI 0.28 scaffolding.
+
 #[macro_use]
 pub mod logger;
 pub mod errors;
@@ -25,17 +27,7 @@ pub use types::*;
 /// have their channel_id computed server-side.
 #[uniffi::export]
 pub fn hash_channel_id(project_id: String, user_ids: Vec<String>) -> String {
-    use sha2::{Digest, Sha256};
-
-    let mut sorted_ids = user_ids;
-    sorted_ids.sort();
-    let concatenated = sorted_ids.join("");
-
-    let mut hasher = Sha256::new();
-    hasher.update(concatenated.as_bytes());
-    let hash_hex = hex::encode(hasher.finalize());
-
-    format!("{}:{}", project_id, &hash_hex[..36])
+    openmls_bindings_core::hash_channel_id(project_id, user_ids)
 }
 
 uniffi::include_scaffolding!("openmls_uniffi");
@@ -55,7 +47,10 @@ mod tests {
             "proj-123".to_string(),
             vec!["alice".to_string(), "bob".to_string()],
         );
-        assert_eq!(r1, r2, "hash must be deterministic regardless of input order");
+        assert_eq!(
+            r1, r2,
+            "hash must be deterministic regardless of input order"
+        );
 
         // Format: "{project_id}:{36-char hex}"
         assert!(r1.starts_with("proj-123:"));

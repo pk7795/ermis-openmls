@@ -1,11 +1,20 @@
-//! UniFFI DTOs and opaque adapters.
+//! Flutter DTOs and opaque result adapters.
 
-use std::sync::Arc;
+use flutter_rust_bridge::frb;
 
-use crate::{errors::MlsError, group::Group};
+use super::group::Group;
 
+#[frb(opaque)]
 pub struct RatchetTree {
     pub(crate) inner: openmls_bindings_core::RatchetTree,
+}
+
+impl Clone for RatchetTree {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 impl RatchetTree {
@@ -13,10 +22,9 @@ impl RatchetTree {
         self.inner.to_bytes()
     }
 
-    pub fn from_bytes(data: Vec<u8>) -> Result<Self, MlsError> {
+    pub fn from_bytes(data: Vec<u8>) -> anyhow::Result<Self> {
         Ok(Self {
-            inner: openmls_bindings_core::RatchetTree::from_bytes(data)
-                .map_err(MlsError::from_core)?,
+            inner: openmls_bindings_core::RatchetTree::from_bytes(data)?,
         })
     }
 }
@@ -106,7 +114,17 @@ impl From<openmls_bindings_core::ProcessedMessage> for ProcessedMessage {
     }
 }
 
+#[frb(opaque)]
 pub struct ExternalJoinResult {
-    pub group: Arc<Group>,
-    pub commit: Vec<u8>,
+    pub(crate) inner: openmls_bindings_core::ExternalJoinResult,
+}
+
+impl ExternalJoinResult {
+    pub fn group(&self) -> Group {
+        Group::from_core(self.inner.group())
+    }
+
+    pub fn commit_bytes(&self) -> Vec<u8> {
+        self.inner.commit_bytes()
+    }
 }

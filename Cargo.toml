@@ -14,7 +14,9 @@ members = [
     "delivery-service/ds-lib",
     "basic_credential",
     "openmls-wasm",
+    "openmls-bindings",
     "openmls-uniffi",
+    "openmls-flutter-bindings",
     "openmls_test",
 ]
 resolver = "2"

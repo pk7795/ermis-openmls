@@ -19,6 +19,10 @@ export ANDROID_NDK_HOME=$HOME/Library/Android/sdk/ndk/<version>
 ./build_mobile.sh bindings
 ```
 
+Binding generation deliberately passes UniFFI's `--no-format` option, so
+`swiftformat` and `ktlint` are not build dependencies. The deterministic Swift,
+C-header, and Kotlin compatibility post-processing still runs afterward.
+
 The build script passes the deployment target into every Rust/C dependency in both device and
 Apple Silicon simulator archives. This prevents a library built with a newer Xcode SDK from
 silently inheriting that SDK's current OS version as its minimum deployment target.

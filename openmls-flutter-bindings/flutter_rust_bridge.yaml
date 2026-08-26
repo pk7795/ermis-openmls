@@ -1,0 +1,13 @@
+# flutter_rust_bridge v2 code generator configuration.
+#
+# Run: flutter_rust_bridge_codegen generate
+# Docs: https://cjycode.com/flutter_rust_bridge/
+
+rust_input: crate::api
+rust_root: ./
+rust_output: src/frb_generated.rs
+dart_root: ./
+dart_output: lib/src/generated/
+dart_entrypoint_class_name: OpenMlsFlutter
+web: false
+stop_on_error: true

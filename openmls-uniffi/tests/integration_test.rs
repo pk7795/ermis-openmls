@@ -7,6 +7,23 @@ use std::sync::Arc;
 
 use openmls_uniffi::*;
 
+type AliceBobGroup = (
+    Arc<Provider>,
+    Arc<Identity>,
+    Arc<Group>,
+    Arc<Provider>,
+    Arc<Identity>,
+    Arc<Group>,
+);
+
+type AliceBobDaveGroup = (
+    Arc<Provider>,
+    Arc<Identity>,
+    Arc<Group>,
+    Arc<Provider>,
+    Arc<Group>,
+);
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -19,14 +36,7 @@ fn create_identity(provider: Arc<Provider>, name: &str) -> Arc<Identity> {
     Arc::new(Identity::new(provider, name.to_string()).unwrap())
 }
 
-fn create_group_alice_and_bob() -> (
-    Arc<Provider>,
-    Arc<Identity>,
-    Arc<Group>,
-    Arc<Provider>,
-    Arc<Identity>,
-    Arc<Group>,
-) {
+fn create_group_alice_and_bob() -> AliceBobGroup {
     let alice_provider = create_provider();
     let bob_provider = create_provider();
 
@@ -69,13 +79,7 @@ fn create_group_alice_and_bob() -> (
     )
 }
 
-fn create_group_alice_bob_dave() -> (
-    Arc<Provider>,
-    Arc<Identity>,
-    Arc<Group>,
-    Arc<Provider>,
-    Arc<Group>,
-) {
+fn create_group_alice_bob_dave() -> AliceBobDaveGroup {
     let alice_provider = create_provider();
     let bob_provider = create_provider();
     let dave_provider = create_provider();

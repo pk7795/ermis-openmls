@@ -237,12 +237,14 @@ generate_bindings() {
     cargo run -p openmls-uniffi --bin uniffi-bindgen generate \
         --library "$PROJECT_ROOT/target/release/libopenmls_uniffi.dylib" \
         --language swift \
+        --no-format \
         --out-dir "$OUT_DIR/swift"
 
     log "Generating Kotlin bindings..."
     cargo run -p openmls-uniffi --bin uniffi-bindgen generate \
         --library "$PROJECT_ROOT/target/release/libopenmls_uniffi.dylib" \
         --language kotlin \
+        --no-format \
         --out-dir "$OUT_DIR/kotlin"
 
     patch_swift_bindings
