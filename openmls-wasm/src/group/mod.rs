@@ -25,7 +25,12 @@ use openmls::{
 use tls_codec::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
-use crate::{identity::Identity, types::RatchetTree, Provider, CIPHERSUITE};
+use crate::{
+    CIPHERSUITE, Provider,
+    errors::{MlsError, MlsErrorCode},
+    identity::Identity,
+    types::RatchetTree,
+};
 use openmls_traits::OpenMlsProvider;
 
 /// An MLS Group representing an encrypted channel
@@ -58,6 +63,43 @@ impl ExternalJoinResult {
 
 #[wasm_bindgen]
 impl Group {
+    fn join_with_welcome_typed_inner(
+        provider: &Provider,
+        welcome: &[u8],
+        ratchet_tree: Option<RatchetTree>,
+    ) -> Result<Group, MlsError> {
+        let mut welcome_slice = welcome;
+        let message = MlsMessageIn::tls_deserialize(&mut welcome_slice).map_err(|error| {
+            MlsError::new(
+                MlsErrorCode::DeserializationError,
+                &format!("Welcome deserialization failed: {error}"),
+            )
+        })?;
+        let mls_welcome = match message.extract() {
+            MlsMessageBodyIn::Welcome(welcome) => welcome,
+            _ => {
+                return Err(MlsError::new(
+                    MlsErrorCode::InvalidMessage,
+                    "Expected a Welcome message",
+                ));
+            }
+        };
+
+        let config = MlsGroupJoinConfig::builder()
+            .use_ratchet_tree_extension(true)
+            .max_past_epochs(5)
+            .sender_ratchet_configuration(SenderRatchetConfiguration::new(10, 2000))
+            .build();
+        let ratchet_tree_in = ratchet_tree.map(|tree| tree.0);
+        let staged =
+            StagedWelcome::new_from_welcome(&provider.0, &config, mls_welcome, ratchet_tree_in)
+                .map_err(MlsError::from_welcome_error)?;
+        let mls_group = staged
+            .into_group(&provider.0)
+            .map_err(MlsError::from_welcome_error)?;
+        Ok(Group { mls_group })
+    }
+
     /// Create a new group with a CID from Ermis
     ///
     /// # Arguments
@@ -74,7 +116,18 @@ impl Group {
         founder: &Identity,
         cid: &str,
     ) -> Result<Group, JsError> {
-        let group_id_bytes = cid.bytes().collect::<Vec<_>>();
+        Self::create_with_group_id(provider, founder, cid.as_bytes())
+    }
+
+    /// Create a generation-aware group using explicit MLS GroupId bytes.
+    pub fn create_with_group_id(
+        provider: &Provider,
+        founder: &Identity,
+        group_id_bytes: &[u8],
+    ) -> Result<Group, JsError> {
+        if group_id_bytes.is_empty() || group_id_bytes.len() > 255 {
+            return Err(JsError::new("MLS GroupId length must be 1..255 bytes"));
+        }
 
         let mls_group = MlsGroup::builder()
             .ciphersuite(CIPHERSUITE)
@@ -106,12 +159,22 @@ impl Group {
     /// * `provider` - Crypto provider (restored from bytes)
     /// * `cid` - Channel ID (e.g., "team:channel_abc123")
     pub fn load(provider: &Provider, cid: &str) -> Result<Group, JsError> {
-        let group_id_bytes = cid.bytes().collect::<Vec<_>>();
+        Self::load_with_group_id(provider, cid.as_bytes())
+    }
+
+    /// Load a generation-aware group using exact MLS GroupId bytes.
+    pub fn load_with_group_id(
+        provider: &Provider,
+        group_id_bytes: &[u8],
+    ) -> Result<Group, JsError> {
+        if group_id_bytes.is_empty() || group_id_bytes.len() > 255 {
+            return Err(JsError::new("MLS GroupId length must be 1..255 bytes"));
+        }
         let group_id = GroupId::from_slice(&group_id_bytes);
 
         let mls_group = MlsGroup::load(provider.0.storage(), &group_id)
             .map_err(|e| JsError::new(&format!("Failed to load group: {e}")))?
-            .ok_or_else(|| JsError::new(&format!("Group not found in storage: {cid}")))?;
+            .ok_or_else(|| JsError::new("Group not found in storage for the supplied GroupId"))?;
 
         Ok(Group { mls_group })
     }
@@ -178,6 +241,17 @@ impl Group {
                 .into_group(&provider.0)?;
 
         Ok(Group { mls_group })
+    }
+
+    /// Join using a Welcome while preserving a stable typed error. Clients may
+    /// automatically fall back to external join only for
+    /// `MlsErrorCode::NoMatchingKeyPackage`; every other error must fail closed.
+    pub fn join_with_welcome_typed(
+        provider: &Provider,
+        welcome: &[u8],
+        ratchet_tree: Option<RatchetTree>,
+    ) -> Result<Group, MlsError> {
+        Self::join_with_welcome_typed_inner(provider, welcome, ratchet_tree)
     }
 
     /// Join a group using a Welcome (legacy API)

@@ -8,10 +8,13 @@ use std::{
 use openmls::{
     credentials::BasicCredential,
     framing::{
-        errors::{MessageDecryptionError, SecretTreeError},
         MlsMessageBodyIn, MlsMessageIn, MlsMessageOut,
+        errors::{MessageDecryptionError, SecretTreeError},
     },
-    group::{GroupId, MlsGroup, MlsGroupJoinConfig, StagedWelcome, WelcomeError},
+    group::{
+        GroupId, MlsGroup, MlsGroupJoinConfig, RecoveryDecryptOptions, StagedWelcome, WelcomeError,
+        decrypt_with_epoch_archive_v2,
+    },
     prelude::{LeafNodeIndex, ProcessMessageError, SenderRatchetConfiguration, ValidationError},
 };
 use openmls_traits::OpenMlsProvider;
@@ -19,7 +22,7 @@ use tls_codec::{Deserialize, Serialize};
 
 use crate::{
     errors::MlsError,
-    identity::{Identity, KeyPackage, CIPHERSUITE},
+    identity::{CIPHERSUITE, Identity, KeyPackage},
     provider::Provider,
     types::*,
 };
@@ -58,7 +61,21 @@ impl Group {
         founder: &Identity,
         cid: String,
     ) -> crate::MlsResult<Self> {
-        let group_id_bytes = cid.bytes().collect::<Vec<_>>();
+        Self::create_with_group_id(provider, founder, cid.into_bytes())
+    }
+
+    /// Create a group with an explicit, server-authorized MLS GroupId.
+    ///
+    /// Generation-aware consumers persist the CID -> (generation, GroupId)
+    /// mapping separately. The CID remains the application channel identity.
+    pub fn create_with_group_id(
+        provider: &Provider,
+        founder: &Identity,
+        group_id_bytes: Vec<u8>,
+    ) -> crate::MlsResult<Self> {
+        if group_id_bytes.is_empty() || group_id_bytes.len() > 255 {
+            return Err(MlsError::InvalidGroupId);
+        }
         let guard = provider.lock();
 
         let mls_group = MlsGroup::builder()
@@ -84,7 +101,17 @@ impl Group {
 
     /// Load an existing group from persistent storage by its CID.
     pub fn load_from_storage(provider: &Provider, cid: String) -> crate::MlsResult<Self> {
-        let group_id_bytes = cid.bytes().collect::<Vec<_>>();
+        Self::load_from_storage_with_group_id(provider, cid.into_bytes())
+    }
+
+    /// Load persisted group state by its exact MLS GroupId bytes.
+    pub fn load_from_storage_with_group_id(
+        provider: &Provider,
+        group_id_bytes: Vec<u8>,
+    ) -> crate::MlsResult<Self> {
+        if group_id_bytes.is_empty() || group_id_bytes.len() > 255 {
+            return Err(MlsError::InvalidGroupId);
+        }
         let group_id = GroupId::from_slice(&group_id_bytes);
         let guard = provider.lock();
 
@@ -244,6 +271,19 @@ impl Group {
         }
     }
 
+    /// Export private current-epoch secrets plus a canonical verification snapshot.
+    pub fn archive_epoch_v2(&self) -> crate::MlsResult<ExportedEpochArchiveV2> {
+        let exported = self
+            .lock_group()
+            .export_epoch_archive_v2()
+            .map_err(|_| MlsError::InvalidState)?;
+        Ok(ExportedEpochArchiveV2 {
+            archive_bytes: exported.archive_bytes,
+            snapshot_bytes: exported.snapshot_bytes,
+            snapshot_hash: exported.snapshot_hash.to_vec(),
+        })
+    }
+
     /// Export group info for external commits
     pub fn export_group_info(
         &self,
@@ -329,7 +369,23 @@ impl Group {
         provider: &Provider,
         msg: Vec<u8>,
     ) -> crate::MlsResult<ProcessedMessage> {
-        self.process_message_with_secret_persistence(provider, msg, true)
+        self.process_message_with_secret_persistence(provider, msg, true, None)
+    }
+
+    /// Process a durable protocol event using its trusted Delivery Service
+    /// acceptance timestamp for KeyPackage lifetime validation.
+    pub fn process_message_at(
+        &self,
+        provider: &Provider,
+        msg: Vec<u8>,
+        server_accepted_at_seconds: u64,
+    ) -> crate::MlsResult<ProcessedMessage> {
+        self.process_message_with_secret_persistence(
+            provider,
+            msg,
+            true,
+            Some(server_accepted_at_seconds),
+        )
     }
 
     /// Process an incoming application message while keeping the durable
@@ -339,7 +395,7 @@ impl Group {
         provider: &Provider,
         msg: Vec<u8>,
     ) -> crate::MlsResult<ProcessedMessage> {
-        self.process_message_with_secret_persistence(provider, msg, false)
+        self.process_message_with_secret_persistence(provider, msg, false, None)
     }
 
     fn process_message_with_secret_persistence(
@@ -347,6 +403,7 @@ impl Group {
         provider: &Provider,
         msg: Vec<u8>,
         persist_message_secrets: bool,
+        server_accepted_at_seconds: Option<u64>,
     ) -> crate::MlsResult<ProcessedMessage> {
         mls_debug!(
             "[MLS] process_message: msg_len={}, group_epoch={}",
@@ -366,11 +423,18 @@ impl Group {
         let processed_msg = match mls_msg.extract() {
             MlsMessageBodyIn::PublicMessage(msg) => {
                 mls_debug!("[MLS] process_message: msg_type=PublicMessage");
-                let result = if persist_message_secrets {
-                    group.process_message(&*prov_guard, msg)
-                } else {
-                    group.process_message_deferred(&*prov_guard, msg)
+                let result = match server_accepted_at_seconds {
+                    Some(accepted_at) => group.process_message_at(&*prov_guard, msg, accepted_at),
+                    None if persist_message_secrets => group.process_message(&*prov_guard, msg),
+                    None => group.process_message_deferred(&*prov_guard, msg),
                 };
+                if result.is_err() && server_accepted_at_seconds.is_some() {
+                    let group_id = group.group_id().clone();
+                    let durable_group = MlsGroup::load(prov_guard.storage(), &group_id)
+                        .map_err(|_| MlsError::StorageError)?
+                        .ok_or(MlsError::GroupNotFound)?;
+                    *group = durable_group;
+                }
                 result.map_err(|error| {
                     mls_error!("[MLS] process_message: public message processing failed");
                     map_process_message_error(error)
@@ -378,11 +442,18 @@ impl Group {
             }
             MlsMessageBodyIn::PrivateMessage(msg) => {
                 mls_debug!("[MLS] process_message: msg_type=PrivateMessage");
-                let result = if persist_message_secrets {
-                    group.process_message(&*prov_guard, msg)
-                } else {
-                    group.process_message_deferred(&*prov_guard, msg)
+                let result = match server_accepted_at_seconds {
+                    Some(accepted_at) => group.process_message_at(&*prov_guard, msg, accepted_at),
+                    None if persist_message_secrets => group.process_message(&*prov_guard, msg),
+                    None => group.process_message_deferred(&*prov_guard, msg),
                 };
+                if result.is_err() && server_accepted_at_seconds.is_some() {
+                    let group_id = group.group_id().clone();
+                    let durable_group = MlsGroup::load(prov_guard.storage(), &group_id)
+                        .map_err(|_| MlsError::StorageError)?
+                        .ok_or(MlsError::GroupNotFound)?;
+                    *group = durable_group;
+                }
                 result.map_err(|error| {
                     mls_error!("[MLS] process_message: private message processing failed");
                     map_process_message_error(error)
@@ -1067,6 +1138,37 @@ impl Group {
 
         serialize_commit_bundle(&commit_msg, welcome_msg.as_ref(), group_info)
     }
+}
+
+/// Decrypt and verify one application ciphertext against explicit V2 archive material.
+pub fn decrypt_epoch_archive_v2(
+    provider: &Provider,
+    archive: Vec<u8>,
+    snapshot: Vec<u8>,
+    ciphertext: Vec<u8>,
+    allow_own_messages: bool,
+    max_forward_distance: u32,
+) -> crate::MlsResult<ArchivedMessage> {
+    let provider = provider.lock();
+    let plaintext = decrypt_with_epoch_archive_v2(
+        provider.crypto(),
+        &archive,
+        &snapshot,
+        &ciphertext,
+        RecoveryDecryptOptions {
+            allow_own_messages,
+            max_forward_distance: (max_forward_distance != 0).then_some(max_forward_distance),
+        },
+    )
+    .map_err(|_| MlsError::InvalidMessage)?;
+    Ok(ArchivedMessage {
+        content: plaintext.content,
+        sender_index: plaintext.sender_index,
+        generation: plaintext.generation,
+        epoch: plaintext.epoch,
+        aad: plaintext.aad,
+        own_message: plaintext.own_message,
+    })
 }
 
 // ============================================================================

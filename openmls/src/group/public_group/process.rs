@@ -9,14 +9,15 @@ use crate::{
     credentials::{Credential, CredentialWithKey},
     error::LibraryError,
     framing::{
-        mls_auth_content::AuthenticatedContent, mls_content::FramedContentBody, ApplicationMessage,
-        DecryptedMessage, ProcessedMessage, ProcessedMessageContent, ProtocolMessage, Sender,
-        SenderContext, UnverifiedMessage,
+        ApplicationMessage, DecryptedMessage, ProcessedMessage, ProcessedMessageContent,
+        ProtocolMessage, Sender, SenderContext, UnverifiedMessage,
+        mls_auth_content::AuthenticatedContent, mls_content::FramedContentBody,
     },
     group::{
-        errors::ValidationError, past_secrets::MessageSecretsStore, proposal_store::QueuedProposal,
-        PublicProcessMessageError,
+        PublicProcessMessageError, errors::ValidationError, past_secrets::MessageSecretsStore,
+        proposal_store::QueuedProposal,
     },
+    key_packages::key_package_in::LifetimeValidationTime,
     messages::proposals::Proposal,
 };
 
@@ -155,6 +156,30 @@ impl PublicGroup {
         crypto: &impl OpenMlsCrypto,
         message: impl Into<ProtocolMessage>,
     ) -> Result<ProcessedMessage, PublicProcessMessageError> {
+        self.process_message_for(crypto, message, LifetimeValidationTime::CurrentTime)
+    }
+
+    /// Processes a durable public protocol event at the trusted Delivery
+    /// Service acceptance timestamp.
+    pub fn process_message_at(
+        &self,
+        crypto: &impl OpenMlsCrypto,
+        message: impl Into<ProtocolMessage>,
+        server_accepted_at_seconds: u64,
+    ) -> Result<ProcessedMessage, PublicProcessMessageError> {
+        self.process_message_for(
+            crypto,
+            message,
+            LifetimeValidationTime::ServerAcceptedAt(server_accepted_at_seconds),
+        )
+    }
+
+    fn process_message_for(
+        &self,
+        crypto: &impl OpenMlsCrypto,
+        message: impl Into<ProtocolMessage>,
+        lifetime_validation_time: LifetimeValidationTime,
+    ) -> Result<ProcessedMessage, PublicProcessMessageError> {
         let protocol_message = message.into();
         // Checks the following semantic validation:
         //  - ValSem002
@@ -163,7 +188,7 @@ impl PublicGroup {
 
         let decrypted_message = match protocol_message {
             ProtocolMessage::PrivateMessage(_) => {
-                return Err(PublicProcessMessageError::IncompatibleWireFormat)
+                return Err(PublicProcessMessageError::IncompatibleWireFormat);
             }
             ProtocolMessage::PublicMessage(public_message) => {
                 DecryptedMessage::from_inbound_public_message(
@@ -181,7 +206,17 @@ impl PublicGroup {
         let unverified_message = self
             .parse_message(decrypted_message, None)
             .map_err(PublicProcessMessageError::from)?;
-        self.process_unverified_message(crypto, unverified_message)
+        match lifetime_validation_time {
+            LifetimeValidationTime::CurrentTime => {
+                self.process_unverified_message(crypto, unverified_message)
+            }
+            LifetimeValidationTime::ServerAcceptedAt(server_accepted_at_seconds) => self
+                .process_unverified_message_for(
+                    crypto,
+                    unverified_message,
+                    LifetimeValidationTime::ServerAcceptedAt(server_accepted_at_seconds),
+                ),
+        }
     }
 }
 
@@ -217,12 +252,29 @@ impl PublicGroup {
         crypto: &impl OpenMlsCrypto,
         unverified_message: UnverifiedMessage,
     ) -> Result<ProcessedMessage, PublicProcessMessageError> {
+        self.process_unverified_message_for(
+            crypto,
+            unverified_message,
+            LifetimeValidationTime::CurrentTime,
+        )
+    }
+
+    fn process_unverified_message_for(
+        &self,
+        crypto: &impl OpenMlsCrypto,
+        unverified_message: UnverifiedMessage,
+        lifetime_validation_time: LifetimeValidationTime,
+    ) -> Result<ProcessedMessage, PublicProcessMessageError> {
         // Checks the following semantic validation:
         //  - ValSem010
         //  - ValSem246 (as part of ValSem010)
         //  - https://validation.openmls.tech/#valn1203
-        let (content, credential) =
-            unverified_message.verify(self.ciphersuite(), crypto, self.version())?;
+        let (content, credential) = unverified_message.verify_for(
+            self.ciphersuite(),
+            crypto,
+            self.version(),
+            lifetime_validation_time,
+        )?;
 
         match content.sender() {
             Sender::Member(_) | Sender::NewMemberCommit | Sender::NewMemberProposal => {
@@ -271,8 +323,12 @@ impl PublicGroup {
         //  - ValSem010
         //  - ValSem246 (as part of ValSem010)
         //  - https://validation.openmls.tech/#valn1203
-        let (content, credential) =
-            unverified_message.verify(self.ciphersuite(), crypto, self.version())?;
+        let (content, credential) = unverified_message.verify_for(
+            self.ciphersuite(),
+            crypto,
+            self.version(),
+            LifetimeValidationTime::CurrentTime,
+        )?;
 
         match content.sender() {
             Sender::Member(_) | Sender::NewMemberCommit | Sender::NewMemberProposal => self

@@ -1,12 +1,12 @@
 use super::{super::errors::*, diff::apply_proposals::ApplyProposalsValues, *};
 use crate::{
-    framing::{mls_auth_content::AuthenticatedContent, mls_content::FramedContentBody, Sender},
+    framing::{Sender, mls_auth_content::AuthenticatedContent, mls_content::FramedContentBody},
     group::{
-        mls_group::staged_commit::StagedCommitState, proposal_store::ProposalQueue, StagedCommit,
+        StagedCommit, mls_group::staged_commit::StagedCommitState, proposal_store::ProposalQueue,
     },
     messages::{
-        proposals::{ProposalOrRef, ProposalType},
         Commit,
+        proposals::{ProposalOrRef, ProposalType},
     },
 };
 
@@ -143,7 +143,10 @@ impl PublicGroup {
         // ValSem104
         self.validate_key_uniqueness(&proposal_queue, Some(commit))?;
         // ValSem105
-        self.validate_add_proposals(&proposal_queue)?;
+        // The embedded KeyPackage lifetime was checked against the trusted
+        // durable-event acceptance timestamp while authenticating the inbound
+        // commit. Do not compare it to a later receiver wall clock here.
+        self.validate_add_proposals(&proposal_queue, LeafNodeLifetimePolicy::Skip)?;
         // ValSem106
         // ValSem109
         self.validate_capabilities(&proposal_queue)?;

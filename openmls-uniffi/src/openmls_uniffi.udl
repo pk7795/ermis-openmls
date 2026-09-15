@@ -4,6 +4,9 @@ namespace openmls_uniffi {
     [Throws=MlsError]
     ExternalJoinResult join_external(Provider provider, Identity identity, bytes group_info, RatchetTree? ratchet_tree);
 
+    [Throws=MlsError]
+    ArchivedMessage decrypt_epoch_archive_v2(Provider provider, bytes archive, bytes snapshot, bytes ciphertext, boolean allow_own_messages, u32 max_forward_distance);
+
     boolean validate_key_package_bytes(bytes data);
 };
 
@@ -17,6 +20,7 @@ enum MlsError {
     "MessageAlreadyConsumed",
     "NoWelcome",
     "InvalidCid",
+    "InvalidGroupId",
     "StorageError",
     "GroupNotFound",
     "CryptoError",
@@ -56,6 +60,21 @@ dictionary ProcessedMessage {
     u32 sender_index;
     u64 epoch;
     bytes aad;
+};
+
+dictionary ExportedEpochArchiveV2 {
+    bytes archive_bytes;
+    bytes snapshot_bytes;
+    bytes snapshot_hash;
+};
+
+dictionary ArchivedMessage {
+    bytes content;
+    u32 sender_index;
+    u32 generation;
+    u64 epoch;
+    bytes aad;
+    boolean own_message;
 };
 
 dictionary ExternalJoinResult {
@@ -129,11 +148,17 @@ interface Group {
     [Throws=MlsError, Name=create_with_cid]
     constructor(Provider provider, Identity founder, string cid);
 
+    [Throws=MlsError, Name=create_with_group_id]
+    constructor(Provider provider, Identity founder, bytes group_id);
+
     [Throws=MlsError, Name=join_with_welcome]
     constructor(Provider provider, bytes welcome, RatchetTree? ratchet_tree);
 
     [Throws=MlsError, Name=load_from_storage]
     constructor(Provider provider, string cid);
+
+    [Throws=MlsError, Name=load_from_storage_with_group_id]
+    constructor(Provider provider, bytes group_id);
 
     // State
     [Throws=MlsError]
@@ -155,6 +180,9 @@ interface Group {
     RatchetTree export_ratchet_tree();
 
     [Throws=MlsError]
+    ExportedEpochArchiveV2 archive_epoch_v2();
+
+    [Throws=MlsError]
     bytes export_group_info(Provider provider, Identity sender, boolean with_ratchet_tree);
 
     [Throws=MlsError]
@@ -171,6 +199,9 @@ interface Group {
 
     [Throws=MlsError]
     ProcessedMessage process_message(Provider provider, bytes msg);
+
+    [Throws=MlsError]
+    ProcessedMessage process_message_at(Provider provider, bytes msg, u64 server_accepted_at_seconds);
 
     [Throws=MlsError]
     ProcessedMessage process_message_deferred(Provider provider, bytes msg);

@@ -7,11 +7,11 @@
 use crate::{
     binary_tree::LeafNodeIndex,
     extensions::{Extensions, SenderExtensionIndex},
-    framing::{mls_auth_content::AuthenticatedContent, MlsMessageOut, PublicMessage},
+    framing::{MlsMessageOut, PublicMessage, mls_auth_content::AuthenticatedContent},
     group::{
+        GroupContext, GroupEpoch, GroupId,
         errors::{CreateGroupContextExtProposalError, ProposeRemoveMemberError},
         mls_group::errors::ProposeAddMemberError,
-        GroupContext, GroupEpoch, GroupId,
     },
     key_packages::KeyPackage,
     messages::{AddProposal, Proposal},

@@ -15,8 +15,20 @@ use tls_codec::{
 };
 
 use super::{
-    errors::KeyPackageVerifyError, InitKey, KeyPackage, KeyPackageTbs, SIGNATURE_KEY_PACKAGE_LABEL,
+    InitKey, KeyPackage, KeyPackageTbs, SIGNATURE_KEY_PACKAGE_LABEL, errors::KeyPackageVerifyError,
 };
+
+/// Selects the instant used to validate a KeyPackage lifetime.
+///
+/// `CurrentTime` is used when a KeyPackage is freshly uploaded, selected, or
+/// otherwise consumed for the first time. `ServerAcceptedAt` is reserved for
+/// replaying an MLS protocol event whose acceptance timestamp was assigned by
+/// a trusted Delivery Service and stored with that durable event.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum LifetimeValidationTime {
+    CurrentTime,
+    ServerAcceptedAt(u64),
+}
 
 #[cfg(any(feature = "test-utils", test))]
 use super::KeyPackageBundle;
@@ -138,6 +150,19 @@ impl KeyPackageIn {
         crypto: &impl OpenMlsCrypto,
         protocol_version: ProtocolVersion,
     ) -> Result<KeyPackage, KeyPackageVerifyError> {
+        self.validate_for(
+            crypto,
+            protocol_version,
+            LifetimeValidationTime::CurrentTime,
+        )
+    }
+
+    pub(crate) fn validate_for(
+        self,
+        crypto: &impl OpenMlsCrypto,
+        protocol_version: ProtocolVersion,
+        lifetime_validation_time: LifetimeValidationTime,
+    ) -> Result<KeyPackage, KeyPackageVerifyError> {
         // We first need to verify the LeafNode inside the KeyPackage
         let leaf_node = self.payload.leaf_node.clone().into_verifiable_leaf_node();
 
@@ -194,7 +219,7 @@ impl KeyPackageIn {
 
         // Ensure validity of the life time extension in the leaf node.
         if let Some(life_time) = key_package.payload.leaf_node.life_time() {
-            if !life_time.is_valid() {
+            if !life_time.is_valid_for(lifetime_validation_time) {
                 return Err(KeyPackageVerifyError::InvalidLifetime);
             }
         } else {

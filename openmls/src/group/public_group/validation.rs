@@ -7,25 +7,25 @@ use openmls_traits::types::VerifiableCiphersuite;
 
 use super::PublicGroup;
 use crate::extensions::RequiredCapabilitiesExtension;
+use crate::group::GroupContextExtensionsProposalValidationError;
 use crate::group::creation::LeafNodeLifetimePolicy;
 use crate::group::proposal_store::ProposalQueue;
-use crate::group::GroupContextExtensionsProposalValidationError;
 use crate::prelude::LibraryError;
-use crate::treesync::{errors::LeafNodeValidationError, LeafNode};
+use crate::treesync::{LeafNode, errors::LeafNodeValidationError};
 use crate::{
     binary_tree::array_representation::LeafNodeIndex,
     framing::{
-        mls_auth_content_in::VerifiableAuthenticatedContentIn, ContentType, ProtocolMessage,
-        Sender, WireFormat,
+        ContentType, ProtocolMessage, Sender, WireFormat,
+        mls_auth_content_in::VerifiableAuthenticatedContentIn,
     },
     group::{
+        Member,
         errors::{ExternalCommitValidationError, ProposalValidationError, ValidationError},
         past_secrets::MessageSecretsStore,
-        Member,
     },
     messages::{
-        proposals::{Proposal, ProposalOrRefType, ProposalType},
         Commit,
+        proposals::{Proposal, ProposalOrRefType, ProposalType},
     },
 };
 
@@ -357,6 +357,7 @@ impl PublicGroup {
     pub(crate) fn validate_add_proposals(
         &self,
         proposal_queue: &ProposalQueue,
+        lifetime_policy: LeafNodeLifetimePolicy,
     ) -> Result<(), ProposalValidationError> {
         let add_proposals = proposal_queue.add_proposals();
 
@@ -372,7 +373,13 @@ impl PublicGroup {
             }
 
             // https://validation.openmls.tech/#valn0202
-            self.validate_leaf_node(add_proposal.add_proposal().key_package().leaf_node())?;
+            // Lifetime was already checked when this Add proposal entered the
+            // trusted protocol event stream. Rechecking against the receiver's
+            // wall clock here would make delayed delivery non-deterministic.
+            self.validate_leaf_node_inner(
+                add_proposal.add_proposal().key_package().leaf_node(),
+                lifetime_policy,
+            )?;
         }
         Ok(())
     }
@@ -583,7 +590,7 @@ impl PublicGroup {
                         LibraryError::custom(
                             "found non-gce proposal when filtered for gce proposals",
                         ),
-                    ))
+                    ));
                 }
             }
         }

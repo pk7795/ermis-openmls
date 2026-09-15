@@ -3,17 +3,17 @@
 use openmls::{
     framing::{MlsMessageBodyIn, MlsMessageIn},
     group::{
+        MlsGroup, RecoveryDecryptOptions,
         decrypt_with_epoch_archive as openmls_decrypt_with_epoch_archive,
         decrypt_with_epoch_archive_v2 as openmls_decrypt_with_epoch_archive_v2,
         peek_sender_data_from_archive as openmls_peek_sender_data_from_archive,
-        RecoveryDecryptOptions,
     },
 };
 use openmls_traits::OpenMlsProvider;
 use tls_codec::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
-use crate::{identity::Identity, Group, Provider};
+use crate::{Group, Provider, identity::Identity};
 
 /// Type of processed message
 #[wasm_bindgen]
@@ -332,16 +332,56 @@ impl Group {
         provider: &mut Provider,
         msg: &[u8],
     ) -> Result<ProcessedMessage, JsError> {
+        self.process_message_for(provider, msg, None)
+    }
+
+    /// Process a durable handshake event using the trusted Bellboy acceptance
+    /// timestamp. Application messages must continue to use `process_message`.
+    pub fn process_message_at(
+        &mut self,
+        provider: &mut Provider,
+        msg: &[u8],
+        server_accepted_at_seconds: u64,
+    ) -> Result<ProcessedMessage, JsError> {
+        self.process_message_for(provider, msg, Some(server_accepted_at_seconds))
+    }
+
+    fn process_message_for(
+        &mut self,
+        provider: &mut Provider,
+        msg: &[u8],
+        server_accepted_at_seconds: Option<u64>,
+    ) -> Result<ProcessedMessage, JsError> {
         let mut msg_slice = msg;
         let mls_msg = MlsMessageIn::tls_deserialize(&mut msg_slice)
             .map_err(|e| JsError::new(&format!("Message deserialization error: {e}")))?;
 
         let processed_msg = match mls_msg.extract() {
             MlsMessageBodyIn::PublicMessage(msg) => {
-                self.mls_group.process_message(provider.as_ref(), msg)?
+                let result = match server_accepted_at_seconds {
+                    Some(accepted_at) => {
+                        self.mls_group
+                            .process_message_at(provider.as_ref(), msg, accepted_at)
+                    }
+                    None => self.mls_group.process_message(provider.as_ref(), msg),
+                };
+                if result.is_err() && server_accepted_at_seconds.is_some() {
+                    self.restore_durable_group_after_historical_failure(provider)?;
+                }
+                result?
             }
             MlsMessageBodyIn::PrivateMessage(msg) => {
-                self.mls_group.process_message(provider.as_ref(), msg)?
+                let result = match server_accepted_at_seconds {
+                    Some(accepted_at) => {
+                        self.mls_group
+                            .process_message_at(provider.as_ref(), msg, accepted_at)
+                    }
+                    None => self.mls_group.process_message(provider.as_ref(), msg),
+                };
+                if result.is_err() && server_accepted_at_seconds.is_some() {
+                    self.restore_durable_group_after_historical_failure(provider)?;
+                }
+                result?
             }
             MlsMessageBodyIn::Welcome(_) => {
                 return Err(JsError::new(
@@ -417,5 +457,27 @@ impl Group {
     ) -> Result<Vec<u8>, JsError> {
         let processed = self.process_message(provider, msg)?;
         Ok(processed.content.unwrap_or_default())
+    }
+}
+
+impl Group {
+    fn restore_durable_group_after_historical_failure(
+        &mut self,
+        provider: &Provider,
+    ) -> Result<(), JsError> {
+        let group_id = self.mls_group.group_id().clone();
+        let durable_group = MlsGroup::load(provider.0.storage(), &group_id)
+            .map_err(|error| {
+                JsError::new(&format!(
+                    "Historical protocol validation failed and durable group reload failed: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                JsError::new(
+                    "Historical protocol validation failed and no durable group state was found",
+                )
+            })?;
+        self.mls_group = durable_group;
+        Ok(())
     }
 }

@@ -253,14 +253,34 @@ impl UnverifiedMessage {
         crypto: &impl OpenMlsCrypto,
         protocol_version: ProtocolVersion,
     ) -> Result<(AuthenticatedContent, Credential), ValidationError> {
+        self.verify_for(
+            ciphersuite,
+            crypto,
+            protocol_version,
+            crate::key_packages::key_package_in::LifetimeValidationTime::CurrentTime,
+        )
+    }
+
+    pub(crate) fn verify_for(
+        self,
+        ciphersuite: Ciphersuite,
+        crypto: &impl OpenMlsCrypto,
+        protocol_version: ProtocolVersion,
+        lifetime_validation_time: crate::key_packages::key_package_in::LifetimeValidationTime,
+    ) -> Result<(AuthenticatedContent, Credential), ValidationError> {
         let content: AuthenticatedContentIn = self
             .verifiable_content
             .verify(crypto, &self.sender_pk)
             .map_err(|_| ValidationError::InvalidSignature)?;
         // https://validation.openmls.tech/#valn1302
         // https://validation.openmls.tech/#valn1304
-        let content =
-            content.validate(ciphersuite, crypto, self.sender_context, protocol_version)?;
+        let content = content.validate_for(
+            ciphersuite,
+            crypto,
+            self.sender_context,
+            protocol_version,
+            lifetime_validation_time,
+        )?;
         Ok((content, self.credential))
     }
 

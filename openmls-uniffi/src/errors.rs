@@ -13,6 +13,7 @@ pub enum MlsError {
     MessageAlreadyConsumed,
     NoWelcome,
     InvalidCid,
+    InvalidGroupId,
     StorageError,
     GroupNotFound,
     CryptoError,
@@ -35,6 +36,7 @@ impl fmt::Display for MlsError {
             }
             MlsError::NoWelcome => write!(f, "Expected welcome message but none was generated"),
             MlsError::InvalidCid => write!(f, "Invalid CID format"),
+            MlsError::InvalidGroupId => write!(f, "Invalid MLS GroupId"),
             MlsError::StorageError => write!(f, "Storage operation failed"),
             MlsError::GroupNotFound => write!(f, "Group not found in storage"),
             MlsError::CryptoError => write!(f, "Crypto operation failed"),
@@ -57,6 +59,7 @@ impl MlsError {
             openmls_bindings_core::MlsError::InvalidMessage => Self::InvalidMessage,
             openmls_bindings_core::MlsError::MessageAlreadyConsumed => Self::MessageAlreadyConsumed,
             openmls_bindings_core::MlsError::InvalidCid => Self::InvalidCid,
+            openmls_bindings_core::MlsError::InvalidGroupId => Self::InvalidGroupId,
             openmls_bindings_core::MlsError::StorageError => Self::StorageError,
             openmls_bindings_core::MlsError::GroupNotFound => Self::GroupNotFound,
             openmls_bindings_core::MlsError::CryptoError => Self::CryptoError,

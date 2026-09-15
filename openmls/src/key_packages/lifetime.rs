@@ -6,6 +6,38 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tls_codec::{TlsDeserialize, TlsDeserializeBytes, TlsSerialize, TlsSize};
 
+use super::key_package_in::LifetimeValidationTime;
+
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_UNIX_TIME_SECONDS: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+struct TestUnixTimeGuard(Option<u64>);
+
+#[cfg(test)]
+impl Drop for TestUnixTimeGuard {
+    fn drop(&mut self) {
+        TEST_UNIX_TIME_SECONDS.with(|clock| clock.set(self.0));
+    }
+}
+
+fn unix_time_seconds() -> Option<u64> {
+    #[cfg(test)]
+    if let Some(unix_time_seconds) = TEST_UNIX_TIME_SECONDS.with(Cell::get) {
+        return Some(unix_time_seconds);
+    }
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .ok()
+}
+
 /// This value is used as the default lifetime if no default  lifetime is configured.
 /// The value is in seconds and amounts to 3 * 28 Days, i.e. about 3 months.
 const DEFAULT_KEY_PACKAGE_LIFETIME_SECONDS: u64 = 60 * 60 * 24 * 28 * 3;
@@ -61,12 +93,15 @@ impl Lifetime {
     /// clocks, i.e. `not_before` is set to now - 1h.
     pub fn new(t: u64) -> Self {
         let lifetime_margin: u64 = DEFAULT_KEY_PACKAGE_LIFETIME_MARGIN_SECONDS;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime before UNIX EPOCH!")
-            .as_secs();
-        let not_before = now - lifetime_margin;
-        let not_after = now + t;
+        let now = match unix_time_seconds() {
+            Some(now) => now,
+            None => {
+                log::error!("SystemTime before UNIX EPOCH.");
+                0
+            }
+        };
+        let not_before = now.saturating_sub(lifetime_margin);
+        let not_after = now.saturating_add(t);
         Self {
             not_before,
             not_after,
@@ -83,16 +118,35 @@ impl Lifetime {
 
     /// Returns true if this lifetime is valid.
     pub fn is_valid(&self) -> bool {
-        match SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-        {
-            Ok(elapsed) => self.not_before < elapsed && elapsed < self.not_after,
-            Err(_) => {
+        self.is_valid_for(LifetimeValidationTime::CurrentTime)
+    }
+
+    pub(crate) fn is_valid_for(&self, validation_time: LifetimeValidationTime) -> bool {
+        let elapsed = match validation_time {
+            LifetimeValidationTime::CurrentTime => unix_time_seconds(),
+            LifetimeValidationTime::ServerAcceptedAt(elapsed) => Some(elapsed),
+        };
+
+        match elapsed {
+            Some(elapsed) => self.is_valid_at(elapsed),
+            None => {
                 log::error!("SystemTime before UNIX EPOCH.");
                 false
             }
         }
+    }
+
+    /// Returns whether `unix_time_seconds` is strictly inside this lifetime.
+    /// RFC 9420 represents both limits as an open interval for this check.
+    pub fn is_valid_at(&self, unix_time_seconds: u64) -> bool {
+        self.not_before < unix_time_seconds && unix_time_seconds < self.not_after
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_unix_time<T>(unix_time_seconds: u64, action: impl FnOnce() -> T) -> T {
+        let previous = TEST_UNIX_TIME_SECONDS.with(|clock| clock.replace(Some(unix_time_seconds)));
+        let _guard = TestUnixTimeGuard(previous);
+        action()
     }
 
     /// ValSem(openmls/annotations#32):
@@ -126,7 +180,7 @@ mod tests {
     use super::Lifetime;
 
     #[test]
-    fn lifetime() {
+    fn lifetime() -> Result<(), tls_codec::Error> {
         // A freshly created extensions must be valid.
         let ext = Lifetime::default();
         assert!(ext.is_valid());
@@ -137,11 +191,21 @@ mod tests {
         assert!(!ext.is_valid());
 
         // Test (de)serializing invalid extension
-        let serialized = ext
-            .tls_serialize_detached()
-            .expect("error encoding life time extension");
-        let ext_deserialized = Lifetime::tls_deserialize(&mut serialized.as_slice())
-            .expect("Error deserializing lifetime");
+        let serialized = ext.tls_serialize_detached()?;
+        let ext_deserialized = Lifetime::tls_deserialize(&mut serialized.as_slice())?;
         assert!(!ext_deserialized.is_valid());
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_validation_time_uses_open_interval_boundaries() {
+        let lifetime = Lifetime::init(100, 200);
+
+        assert!(!lifetime.is_valid_at(99));
+        assert!(!lifetime.is_valid_at(100));
+        assert!(lifetime.is_valid_at(101));
+        assert!(lifetime.is_valid_at(199));
+        assert!(!lifetime.is_valid_at(200));
+        assert!(!lifetime.is_valid_at(201));
     }
 }

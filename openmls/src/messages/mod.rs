@@ -20,7 +20,7 @@ use crate::{
     error::LibraryError,
     framing::SenderContext,
     group::errors::ValidationError,
-    schedule::{psk::PreSharedKeyId, JoinerSecret},
+    schedule::{JoinerSecret, psk::PreSharedKeyId},
     treesync::{
         node::{
             encryption_keys::{EncryptionKey, EncryptionKeyPair, EncryptionPrivateKey},
@@ -219,11 +219,19 @@ impl CommitIn {
         crypto: &impl OpenMlsCrypto,
         sender_context: SenderContext,
         protocol_version: ProtocolVersion,
+        lifetime_validation_time: crate::key_packages::key_package_in::LifetimeValidationTime,
     ) -> Result<Commit, ValidationError> {
         let proposals = self
             .proposals
             .into_iter()
-            .map(|p| p.validate(crypto, ciphersuite, protocol_version))
+            .map(|p| {
+                p.validate_for(
+                    crypto,
+                    ciphersuite,
+                    protocol_version,
+                    lifetime_validation_time,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         let path = if let Some(path) = self.path {
@@ -503,16 +511,17 @@ impl GroupSecrets {
             rng,
             Psk::External(ExternalPsk::new(
                 rng.random_vec(ciphersuite.hash_length())
-                    .expect("Not enough randomness."),
+                    .map_err(|_| tls_codec::Error::InvalidInput)?,
             )),
         )
-        .expect("An unexpected error occurred.");
+        .map_err(|_| tls_codec::Error::InvalidInput)?;
         let psks = vec![psk_id];
 
         GroupSecrets::new_encoded(
             &JoinerSecret::random(ciphersuite, rng),
             Some(&PathSecret {
-                path_secret: Secret::random(ciphersuite, rng).expect("Not enough randomness."),
+                path_secret: Secret::random(ciphersuite, rng)
+                    .map_err(|_| tls_codec::Error::InvalidInput)?,
             }),
             &psks,
         )

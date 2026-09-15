@@ -10,26 +10,27 @@ use tls_codec::Serialize as _;
 
 use crate::{
     binary_tree::LeafNodeIndex,
-    ciphersuite::{signable::Signable as _, Secret},
+    ciphersuite::{Secret, signable::Signable as _},
     extensions::Extensions,
     framing::{FramingParameters, WireFormat},
     group::{
-        diff::compute_path::{CommitType, PathComputationResult},
         CommitBuilderStageError, CreateCommitError, Extension, ExternalPubExtension, GroupContext,
         ProposalQueue, ProposalQueueError, QueuedProposal, RatchetTreeExtension, StagedCommit,
         WireFormatPolicy,
+        creation::LeafNodeLifetimePolicy,
+        diff::compute_path::{CommitType, PathComputationResult},
     },
     key_packages::KeyPackage,
     messages::{
-        group_info::{GroupInfo, GroupInfoTBS},
         Commit, Welcome,
+        group_info::{GroupInfo, GroupInfoTBS},
     },
     prelude::{
         CredentialWithKey, InvalidExtensionError, LeafNodeParameters, LibraryError, NewSignerBundle,
     },
     schedule::{
-        psk::{load_psks, PskSecret},
         EpochSecretsResult, JoinerSecret, KeySchedule, PreSharedKeyId,
+        psk::{PskSecret, load_psks},
     },
     storage::{OpenMlsProvider, StorageProvider},
     versions::ProtocolVersion,
@@ -49,10 +50,10 @@ pub use external_commits::{ExternalCommitBuilder, ExternalCommitBuilderError};
 use super::MlsGroupJoinConfig;
 
 use super::{
-    mls_auth_content::AuthenticatedContent,
-    staged_commit::{MemberStagedCommitState, StagedCommitState},
     AddProposal, CreateCommitResult, GroupContextExtensionProposal, MlsGroup, MlsGroupState,
     MlsMessageOut, PendingCommitState, Proposal, RemoveProposal, Sender,
+    mls_auth_content::AuthenticatedContent,
+    staged_commit::{MemberStagedCommitState, StagedCommitState},
 };
 
 #[derive(Debug)]
@@ -147,8 +148,8 @@ pub struct Complete {
 ///   .stage_commit(provider)?;
 ///
 /// let commit = message_bundle.commit();
-/// let welcome = message_bundle.welcome().expect("expected a welcome since there was an add");
-/// let group_info = message_bundle.welcome().expect("expected a group info since there was an add");
+/// let welcome = message_bundle.welcome().ok_or("expected a welcome since there was an add")?;
+/// let group_info = message_bundle.group_info().ok_or("expected group info since there was an add")?;
 /// ```
 ///
 /// In this example `signer` is a reference to a [`Signer`] and `app_policy_proposals` is the
@@ -519,7 +520,11 @@ impl<'a, G: BorrowMut<MlsGroup>> CommitBuilder<'a, LoadedPsks, G> {
             .public_group
             .validate_key_uniqueness(&proposal_queue, None)?;
         // ValSem105
-        group.public_group.validate_add_proposals(&proposal_queue)?;
+        // Outgoing commits consume fresh KeyPackages, so their lifetimes remain
+        // strict-current even though inbound historical replay is contextual.
+        group
+            .public_group
+            .validate_add_proposals(&proposal_queue, LeafNodeLifetimePolicy::Verify)?;
         // ValSem106
         // ValSem109
         group.public_group.validate_capabilities(&proposal_queue)?;

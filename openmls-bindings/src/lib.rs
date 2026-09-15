@@ -23,7 +23,7 @@ mod storage;
 pub mod types;
 
 pub use errors::MlsError;
-pub use group::{join_external, Group};
+pub use group::{decrypt_epoch_archive_v2, join_external, Group};
 pub use identity::{hash_channel_id, validate_key_package_bytes, Identity, KeyPackage};
 pub use provider::Provider;
 pub use types::*;

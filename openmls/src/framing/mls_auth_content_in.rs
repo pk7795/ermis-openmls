@@ -17,6 +17,7 @@ use crate::{
     ciphersuite::signable::{SignedStruct, Verifiable, VerifiedStruct},
     credentials::CredentialWithKey,
     group::errors::ValidationError,
+    key_packages::key_package_in::LifetimeValidationTime,
     messages::proposals_in::ProposalIn,
     versions::ProtocolVersion,
 };
@@ -54,6 +55,23 @@ impl AuthenticatedContentIn {
         sender_context: Option<SenderContext>,
         protocol_version: ProtocolVersion,
     ) -> Result<AuthenticatedContent, ValidationError> {
+        self.validate_for(
+            ciphersuite,
+            crypto,
+            sender_context,
+            protocol_version,
+            LifetimeValidationTime::CurrentTime,
+        )
+    }
+
+    pub(crate) fn validate_for(
+        self,
+        ciphersuite: Ciphersuite,
+        crypto: &impl OpenMlsCrypto,
+        sender_context: Option<SenderContext>,
+        protocol_version: ProtocolVersion,
+        lifetime_validation_time: LifetimeValidationTime,
+    ) -> Result<AuthenticatedContent, ValidationError> {
         Ok(AuthenticatedContent {
             wire_format: self.wire_format,
             content: self.content.validate(
@@ -61,6 +79,7 @@ impl AuthenticatedContentIn {
                 crypto,
                 sender_context,
                 protocol_version,
+                lifetime_validation_time,
             )?,
             auth: self.auth,
         })

@@ -8,7 +8,7 @@ use crate::{
     extensions::{AnyObject, Extensions},
     framing::SenderContext,
     group::errors::ValidationError,
-    key_packages::*,
+    key_packages::{key_package_in::LifetimeValidationTime, *},
     prelude::InvalidExtensionError,
     treesync::node::leaf_node::{LeafNodeIn, TreePosition, VerifiableLeafNode},
     versions::ProtocolVersion,
@@ -19,11 +19,11 @@ use serde::{Deserialize, Serialize};
 use tls_codec::{TlsDeserialize, TlsDeserializeBytes, TlsSerialize, TlsSize};
 
 use super::{
+    CustomProposal,
     proposals::{
         AddProposal, ExternalInitProposal, GroupContextExtensionProposal, PreSharedKeyProposal,
         Proposal, ProposalOrRef, ProposalType, ReInitProposal, RemoveProposal, UpdateProposal,
     },
-    CustomProposal,
 };
 
 #[cfg(feature = "extensions-draft-08")]
@@ -104,12 +104,14 @@ impl ProposalIn {
         ciphersuite: Ciphersuite,
         sender_context: Option<SenderContext>,
         protocol_version: ProtocolVersion,
+        lifetime_validation_time: LifetimeValidationTime,
     ) -> Result<Proposal, ValidationError> {
         Ok(match self {
             ProposalIn::Add(add) => Proposal::Add(Box::new(add.validate(
                 crypto,
                 protocol_version,
                 ciphersuite,
+                lifetime_validation_time,
             )?)),
             ProposalIn::Update(update) => {
                 let sender_context =
@@ -173,8 +175,11 @@ impl AddProposalIn {
         crypto: &impl OpenMlsCrypto,
         protocol_version: ProtocolVersion,
         ciphersuite: Ciphersuite,
+        lifetime_validation_time: LifetimeValidationTime,
     ) -> Result<AddProposal, ValidationError> {
-        let key_package = self.key_package.validate(crypto, protocol_version)?;
+        let key_package =
+            self.key_package
+                .validate_for(crypto, protocol_version, lifetime_validation_time)?;
         // Verify that the ciphersuite is valid
         if key_package.ciphersuite() != ciphersuite {
             return Err(ValidationError::InvalidAddProposalCiphersuite);
@@ -273,10 +278,31 @@ impl ProposalOrRefIn {
         ciphersuite: Ciphersuite,
         protocol_version: ProtocolVersion,
     ) -> Result<ProposalOrRef, ValidationError> {
+        self.validate_for(
+            crypto,
+            ciphersuite,
+            protocol_version,
+            LifetimeValidationTime::CurrentTime,
+        )
+    }
+
+    pub(crate) fn validate_for(
+        self,
+        crypto: &impl OpenMlsCrypto,
+        ciphersuite: Ciphersuite,
+        protocol_version: ProtocolVersion,
+        lifetime_validation_time: LifetimeValidationTime,
+    ) -> Result<ProposalOrRef, ValidationError> {
         Ok(match self {
-            ProposalOrRefIn::Proposal(proposal_in) => ProposalOrRef::Proposal(Box::new(
-                proposal_in.validate(crypto, ciphersuite, None, protocol_version)?,
-            )),
+            ProposalOrRefIn::Proposal(proposal_in) => {
+                ProposalOrRef::Proposal(Box::new(proposal_in.validate(
+                    crypto,
+                    ciphersuite,
+                    None,
+                    protocol_version,
+                    lifetime_validation_time,
+                )?))
+            }
             ProposalOrRefIn::Reference(reference) => ProposalOrRef::Reference(reference),
         })
     }
@@ -334,16 +360,19 @@ impl From<UpdateProposal> for UpdateProposalIn {
 #[cfg(any(feature = "test-utils", test))]
 impl From<GroupContextExtensionProposalIn> for GroupContextExtensionProposal {
     fn from(value: GroupContextExtensionProposalIn) -> Self {
-        Self::new(value.extensions_tbv.try_into().unwrap())
+        let extensions = value.extensions_tbv.try_into();
+        assert!(
+            extensions.is_ok(),
+            "test GroupContext extensions must be valid"
+        );
+        Self::new(extensions.unwrap_or_default())
     }
 }
 
 #[cfg(any(feature = "test-utils", test))]
 impl From<GroupContextExtensionProposalIn> for Box<GroupContextExtensionProposal> {
     fn from(value: GroupContextExtensionProposalIn) -> Self {
-        Box::new(GroupContextExtensionProposal::new(
-            value.extensions_tbv.try_into().unwrap(),
-        ))
+        Box::new(GroupContextExtensionProposal::from(value))
     }
 }
 

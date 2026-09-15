@@ -7,7 +7,8 @@ use openmls_traits::{crypto::OpenMlsCrypto, signatures::Signer, storage::Storage
 
 use crate::{
     framing::mls_content::FramedContentBody,
-    group::{errors::MergeCommitError, StageCommitError, ValidationError},
+    group::{StageCommitError, ValidationError, errors::MergeCommitError},
+    key_packages::key_package_in::LifetimeValidationTime,
     messages::group_info::GroupInfo,
     storage::OpenMlsProvider,
     tree::sender_ratchet::SenderRatchetConfiguration,
@@ -121,7 +122,36 @@ impl MlsGroup {
         provider: &Provider,
         message: impl Into<ProtocolMessage>,
     ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
-        self.process_message_with_secret_persistence(provider, message, true)
+        self.process_message_with_secret_persistence(
+            provider,
+            message,
+            true,
+            false,
+            LifetimeValidationTime::CurrentTime,
+        )
+    }
+
+    /// Processes a durable protocol event using the trusted Delivery Service
+    /// acceptance timestamp for KeyPackage lifetime validation.
+    ///
+    /// The timestamp must be assigned by the Delivery Service and persisted
+    /// with the event. Applications must not pass a value supplied by another
+    /// client or silently substitute the receiver's current clock. Message
+    /// secrets are not persisted until semantic validation succeeds, so a
+    /// validation failure can be recovered by reloading durable group state.
+    pub fn process_message_at<Provider: OpenMlsProvider>(
+        &mut self,
+        provider: &Provider,
+        message: impl Into<ProtocolMessage>,
+        server_accepted_at_seconds: u64,
+    ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
+        self.process_message_with_secret_persistence(
+            provider,
+            message,
+            false,
+            true,
+            LifetimeValidationTime::ServerAcceptedAt(server_accepted_at_seconds),
+        )
     }
 
     /// Processes a message without persisting the modified message-secret tree.
@@ -138,7 +168,29 @@ impl MlsGroup {
         provider: &Provider,
         message: impl Into<ProtocolMessage>,
     ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
-        self.process_message_with_secret_persistence(provider, message, false)
+        self.process_message_with_secret_persistence(
+            provider,
+            message,
+            false,
+            false,
+            LifetimeValidationTime::CurrentTime,
+        )
+    }
+
+    /// Deferred-secret-persistence variant of [`Self::process_message_at`].
+    pub fn process_message_deferred_at<Provider: OpenMlsProvider>(
+        &mut self,
+        provider: &Provider,
+        message: impl Into<ProtocolMessage>,
+        server_accepted_at_seconds: u64,
+    ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
+        self.process_message_with_secret_persistence(
+            provider,
+            message,
+            false,
+            false,
+            LifetimeValidationTime::ServerAcceptedAt(server_accepted_at_seconds),
+        )
     }
 
     fn process_message_with_secret_persistence<Provider: OpenMlsProvider>(
@@ -146,7 +198,11 @@ impl MlsGroup {
         provider: &Provider,
         message: impl Into<ProtocolMessage>,
         persist_message_secrets: bool,
+        persist_message_secrets_after_validation: bool,
+        lifetime_validation_time: LifetimeValidationTime,
     ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
+        let message = message.into();
+        let will_modify_secret_tree = matches!(message, ProtocolMessage::PrivateMessage(_));
         let unverified_message = self.unprotect_message_with_secret_persistence(
             provider,
             message,
@@ -165,7 +221,26 @@ impl MlsGroup {
                 }
             }
         }
-        self.process_unverified_message(provider, unverified_message)
+        let result = match lifetime_validation_time {
+            LifetimeValidationTime::CurrentTime => {
+                self.process_unverified_message(provider, unverified_message)
+            }
+            LifetimeValidationTime::ServerAcceptedAt(server_accepted_at_seconds) => self
+                .process_unverified_message_for(
+                    provider,
+                    unverified_message,
+                    LifetimeValidationTime::ServerAcceptedAt(server_accepted_at_seconds),
+                ),
+        };
+
+        if result.is_ok() && will_modify_secret_tree && persist_message_secrets_after_validation {
+            provider
+                .storage()
+                .write_message_secrets(self.group_id(), &self.message_secrets_store)
+                .map_err(ProcessMessageError::StorageError)?;
+        }
+
+        result
     }
 
     #[cfg(feature = "extensions-draft-08")]
@@ -395,13 +470,51 @@ impl MlsGroup {
         unverified_message: UnverifiedMessage,
         app_data_dict_updates: Option<AppDataUpdates>,
     ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
+        self.process_unverified_message_with_app_data_updates_for(
+            provider,
+            unverified_message,
+            app_data_dict_updates,
+            LifetimeValidationTime::CurrentTime,
+        )
+    }
+
+    /// Processes an AppDataUpdate-bearing durable event with its trusted
+    /// Delivery Service acceptance timestamp.
+    #[cfg(feature = "extensions-draft-08")]
+    pub fn process_unverified_message_with_app_data_updates_at<Provider: OpenMlsProvider>(
+        &self,
+        provider: &Provider,
+        unverified_message: UnverifiedMessage,
+        app_data_dict_updates: Option<AppDataUpdates>,
+        server_accepted_at_seconds: u64,
+    ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
+        self.process_unverified_message_with_app_data_updates_for(
+            provider,
+            unverified_message,
+            app_data_dict_updates,
+            LifetimeValidationTime::ServerAcceptedAt(server_accepted_at_seconds),
+        )
+    }
+
+    #[cfg(feature = "extensions-draft-08")]
+    fn process_unverified_message_with_app_data_updates_for<Provider: OpenMlsProvider>(
+        &self,
+        provider: &Provider,
+        unverified_message: UnverifiedMessage,
+        app_data_dict_updates: Option<AppDataUpdates>,
+        lifetime_validation_time: LifetimeValidationTime,
+    ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
         // Checks the following semantic validation:
         //  - ValSem010
         //  - ValSem246 (as part of ValSem010)
         //  - https://validation.openmls.tech/#valn1302
         //  - https://validation.openmls.tech/#valn1304
-        let (content, credential) =
-            unverified_message.verify(self.ciphersuite(), provider.crypto(), self.version())?;
+        let (content, credential) = unverified_message.verify_for(
+            self.ciphersuite(),
+            provider.crypto(),
+            self.version(),
+            lifetime_validation_time,
+        )?;
 
         match content.sender() {
             Sender::Member(_) | Sender::NewMemberProposal | Sender::NewMemberCommit => self
@@ -449,13 +562,30 @@ impl MlsGroup {
         provider: &Provider,
         unverified_message: UnverifiedMessage,
     ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
+        self.process_unverified_message_for(
+            provider,
+            unverified_message,
+            LifetimeValidationTime::CurrentTime,
+        )
+    }
+
+    fn process_unverified_message_for<Provider: OpenMlsProvider>(
+        &self,
+        provider: &Provider,
+        unverified_message: UnverifiedMessage,
+        lifetime_validation_time: LifetimeValidationTime,
+    ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
         // Checks the following semantic validation:
         //  - ValSem010
         //  - ValSem246 (as part of ValSem010)
         //  - https://validation.openmls.tech/#valn1302
         //  - https://validation.openmls.tech/#valn1304
-        let (content, credential) =
-            unverified_message.verify(self.ciphersuite(), provider.crypto(), self.version())?;
+        let (content, credential) = unverified_message.verify_for(
+            self.ciphersuite(),
+            provider.crypto(),
+            self.version(),
+            lifetime_validation_time,
+        )?;
 
         match content.sender() {
             Sender::Member(_) | Sender::NewMemberProposal | Sender::NewMemberCommit => {

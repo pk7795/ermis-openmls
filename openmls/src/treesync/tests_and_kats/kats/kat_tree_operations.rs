@@ -31,12 +31,12 @@ use crate::{
     extensions::Extensions,
     framing::Sender,
     group::{
-        proposal_store::{ProposalQueue, QueuedProposal},
         GroupContext, GroupEpoch, GroupId, PublicGroup,
+        proposal_store::{ProposalQueue, QueuedProposal},
     },
-    messages::{proposals::Proposal, proposals_in::ProposalIn, ConfirmationTag},
+    messages::{ConfirmationTag, proposals::Proposal, proposals_in::ProposalIn},
     test_utils::*,
-    treesync::{node::NodeIn, RatchetTree, RatchetTreeIn, TreeSync},
+    treesync::{RatchetTree, RatchetTreeIn, TreeSync, node::NodeIn},
 };
 
 #[derive(Deserialize)]

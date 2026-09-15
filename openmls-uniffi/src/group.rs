@@ -7,8 +7,8 @@ use crate::{
     identity::{Identity, KeyPackage},
     provider::Provider,
     types::{
-        CommitBundle, ExternalJoinResult, MemberInfo, ProcessedMessage, ProposalMessage,
-        RatchetTree,
+        ArchivedMessage, CommitBundle, ExportedEpochArchiveV2, ExternalJoinResult, MemberInfo,
+        ProcessedMessage, ProposalMessage, RatchetTree,
     },
 };
 
@@ -32,10 +32,38 @@ impl Group {
         ))
     }
 
+    pub fn create_with_group_id(
+        provider: Arc<Provider>,
+        founder: Arc<Identity>,
+        group_id: Vec<u8>,
+    ) -> Result<Self, MlsError> {
+        Ok(Self::from_core(
+            openmls_bindings_core::Group::create_with_group_id(
+                provider.core(),
+                founder.core(),
+                group_id,
+            )
+            .map_err(MlsError::from_core)?,
+        ))
+    }
+
     pub fn load_from_storage(provider: Arc<Provider>, cid: String) -> Result<Self, MlsError> {
         Ok(Self::from_core(
             openmls_bindings_core::Group::load_from_storage(provider.core(), cid)
                 .map_err(MlsError::from_core)?,
+        ))
+    }
+
+    pub fn load_from_storage_with_group_id(
+        provider: Arc<Provider>,
+        group_id: Vec<u8>,
+    ) -> Result<Self, MlsError> {
+        Ok(Self::from_core(
+            openmls_bindings_core::Group::load_from_storage_with_group_id(
+                provider.core(),
+                group_id,
+            )
+            .map_err(MlsError::from_core)?,
         ))
     }
 
@@ -112,6 +140,14 @@ impl Group {
         })
     }
 
+    pub fn archive_epoch_v2(&self) -> Result<ExportedEpochArchiveV2, MlsError> {
+        Ok(self
+            .inner
+            .archive_epoch_v2()
+            .map_err(MlsError::from_core)?
+            .into())
+    }
+
     pub fn export_group_info(
         &self,
         provider: Arc<Provider>,
@@ -182,6 +218,19 @@ impl Group {
         Ok(self
             .inner
             .process_message_deferred(provider.core(), msg)
+            .map_err(MlsError::from_core)?
+            .into())
+    }
+
+    pub fn process_message_at(
+        &self,
+        provider: Arc<Provider>,
+        msg: Vec<u8>,
+        server_accepted_at_seconds: u64,
+    ) -> Result<ProcessedMessage, MlsError> {
+        Ok(self
+            .inner
+            .process_message_at(provider.core(), msg, server_accepted_at_seconds)
             .map_err(MlsError::from_core)?
             .into())
     }
@@ -500,4 +549,24 @@ pub fn join_external(
         group: Arc::new(Group::from_core(result.group())),
         commit: result.commit_bytes(),
     })
+}
+
+pub fn decrypt_epoch_archive_v2(
+    provider: Arc<Provider>,
+    archive: Vec<u8>,
+    snapshot: Vec<u8>,
+    ciphertext: Vec<u8>,
+    allow_own_messages: bool,
+    max_forward_distance: u32,
+) -> Result<ArchivedMessage, MlsError> {
+    Ok(openmls_bindings_core::decrypt_epoch_archive_v2(
+        provider.core(),
+        archive,
+        snapshot,
+        ciphertext,
+        allow_own_messages,
+        max_forward_distance,
+    )
+    .map_err(MlsError::from_core)?
+    .into())
 }

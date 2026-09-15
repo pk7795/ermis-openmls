@@ -245,6 +245,45 @@ fn test_encrypted_messaging() {
 }
 
 #[test]
+fn test_v2_epoch_archive_decrypts_and_rejects_untrusted_snapshot()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (alice_provider, alice, alice_group, bob_provider, _, bob_group) =
+        create_group_alice_and_bob();
+    let exported = bob_group.archive_epoch_v2()?;
+    let ciphertext = alice_group.create_message(
+        alice_provider,
+        alice,
+        b"archived generation payload".to_vec(),
+    )?;
+
+    let recovered = decrypt_epoch_archive_v2(
+        bob_provider.clone(),
+        exported.archive_bytes.clone(),
+        exported.snapshot_bytes.clone(),
+        ciphertext.clone(),
+        false,
+        0,
+    )?;
+    assert_eq!(recovered.content, b"archived generation payload");
+    assert!(!recovered.own_message);
+
+    let mut untrusted_snapshot = exported.snapshot_bytes;
+    if let Some(first) = untrusted_snapshot.first_mut() {
+        *first ^= 1;
+    }
+    let rejected = decrypt_epoch_archive_v2(
+        bob_provider,
+        exported.archive_bytes,
+        untrusted_snapshot,
+        ciphertext,
+        false,
+        0,
+    );
+    assert!(matches!(rejected, Err(MlsError::InvalidMessage)));
+    Ok(())
+}
+
+#[test]
 fn test_encrypted_messaging_with_aad() {
     let (alice_provider, alice, chess_club_alice, bob_provider, _, chess_club_bob) =
         create_group_alice_and_bob();

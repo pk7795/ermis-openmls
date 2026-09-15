@@ -82,6 +82,23 @@ pub struct ProcessedMessage {
     pub aad: Vec<u8>,
 }
 
+/// Private MLS epoch material and its independently verifiable member snapshot.
+pub struct ExportedEpochArchiveV2 {
+    pub archive_bytes: Vec<u8>,
+    pub snapshot_bytes: Vec<u8>,
+    pub snapshot_hash: Vec<u8>,
+}
+
+/// Authenticated application plaintext recovered from an archived MLS epoch.
+pub struct ArchivedMessage {
+    pub content: Vec<u8>,
+    pub sender_index: u32,
+    pub generation: u32,
+    pub epoch: u64,
+    pub aad: Vec<u8>,
+    pub own_message: bool,
+}
+
 /// Result of an external join (self-join with GroupInfo).
 ///
 /// Opaque because it contains the opaque `Group` type.

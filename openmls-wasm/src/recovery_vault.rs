@@ -1,15 +1,15 @@
 use openmls_traits::{
+    OpenMlsProvider,
     crypto::OpenMlsCrypto,
     random::OpenMlsRand,
     types::{AeadType, HpkeCiphertext},
-    OpenMlsProvider,
 };
 use pbkdf2::pbkdf2_hmac;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use wasm_bindgen::prelude::*;
 
-use crate::{Provider, CIPHERSUITE};
+use crate::{CIPHERSUITE, Provider};
 
 const MIN_PIN_DIGITS: usize = 8;
 const MIN_PBKDF2_ITERATIONS: u32 = 600_000;
@@ -85,6 +85,8 @@ impl WrappedRecoveryKey {
 pub struct ArchiveBlobAad {
     domain: String,
     cid: String,
+    #[serde(default, skip_serializing_if = "is_zero_generation")]
+    group_generation: u64,
     epoch: u64,
     scope: String,
     blob_id: String,
@@ -94,10 +96,36 @@ pub struct ArchiveBlobAad {
 #[wasm_bindgen]
 impl ArchiveBlobAad {
     #[wasm_bindgen(constructor)]
-    pub fn new(cid: String, epoch: u64, scope: String, blob_id: String, snapshot_hash: String) -> Self {
+    pub fn new(
+        cid: String,
+        epoch: u64,
+        scope: String,
+        blob_id: String,
+        snapshot_hash: String,
+    ) -> Self {
         Self {
             domain: ARCHIVE_BLOB_DOMAIN.to_string(),
             cid,
+            group_generation: 0,
+            epoch,
+            scope,
+            blob_id,
+            snapshot_hash,
+        }
+    }
+    #[wasm_bindgen(js_name = forGeneration)]
+    pub fn for_generation(
+        cid: String,
+        group_generation: u64,
+        epoch: u64,
+        scope: String,
+        blob_id: String,
+        snapshot_hash: String,
+    ) -> Self {
+        Self {
+            domain: ARCHIVE_BLOB_DOMAIN.to_string(),
+            cid,
+            group_generation,
             epoch,
             scope,
             blob_id,
@@ -114,6 +142,8 @@ impl ArchiveBlobAad {
 pub struct ArchiveKeyWrapInfo {
     domain: String,
     channel_id: String,
+    #[serde(default, skip_serializing_if = "is_zero_generation")]
+    group_generation: u64,
     epoch: u64,
     scope: String,
     blob_id: String,
@@ -135,6 +165,28 @@ impl ArchiveKeyWrapInfo {
         Self {
             domain: ARCHIVE_ADK_DOMAIN.to_string(),
             channel_id,
+            group_generation: 0,
+            epoch,
+            scope,
+            blob_id,
+            snapshot_hash,
+            recipient_key_id,
+        }
+    }
+    #[wasm_bindgen(js_name = forGeneration)]
+    pub fn for_generation(
+        channel_id: String,
+        group_generation: u64,
+        epoch: u64,
+        scope: String,
+        blob_id: String,
+        snapshot_hash: String,
+        recipient_key_id: String,
+    ) -> Self {
+        Self {
+            domain: ARCHIVE_ADK_DOMAIN.to_string(),
+            channel_id,
+            group_generation,
             epoch,
             scope,
             blob_id,
@@ -145,6 +197,10 @@ impl ArchiveKeyWrapInfo {
     pub fn to_bytes(&self) -> Result<Vec<u8>, JsError> {
         serde_json::to_vec(self).map_err(|e| JsError::new(&format!("serialize HPKE info: {e}")))
     }
+}
+
+fn is_zero_generation(value: &u64) -> bool {
+    *value == 0
 }
 
 #[wasm_bindgen]
@@ -206,7 +262,8 @@ impl HpkeWrappedArchiveDataKey {
         serde_json::to_vec(self).map_err(|e| JsError::new(&format!("serialize HPKE wrap: {e}")))
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<HpkeWrappedArchiveDataKey, JsError> {
-        serde_json::from_slice(bytes).map_err(|e| JsError::new(&format!("deserialize HPKE wrap: {e}")))
+        serde_json::from_slice(bytes)
+            .map_err(|e| JsError::new(&format!("deserialize HPKE wrap: {e}")))
     }
 }
 
@@ -246,13 +303,27 @@ pub fn wrap_recovery_private_key(
     if iterations < MIN_PBKDF2_ITERATIONS {
         return Err(JsError::new("PBKDF2 iterations must be >= 600,000"));
     }
-    let salt = provider.0.rand().random_vec(16).map_err(|e| JsError::new(&format!("{e:?}")))?;
-    let nonce = provider.0.rand().random_vec(12).map_err(|e| JsError::new(&format!("{e:?}")))?;
+    let salt = provider
+        .0
+        .rand()
+        .random_vec(16)
+        .map_err(|e| JsError::new(&format!("{e:?}")))?;
+    let nonce = provider
+        .0
+        .rand()
+        .random_vec(12)
+        .map_err(|e| JsError::new(&format!("{e:?}")))?;
     let key = derive_pin_key(pin, &salt, iterations);
     let wrapped_private_key = provider
         .0
         .crypto()
-        .aead_encrypt(AeadType::Aes256Gcm, &key, private_key, &nonce, key_id.as_bytes())
+        .aead_encrypt(
+            AeadType::Aes256Gcm,
+            &key,
+            private_key,
+            &nonce,
+            key_id.as_bytes(),
+        )
         .map_err(|e| JsError::new(&format!("wrap recovery key: {e:?}")))?;
     Ok(WrappedRecoveryKey {
         version: 1,
@@ -294,8 +365,16 @@ pub fn encrypt_archive_blob(
     archive_bytes: &[u8],
     aad: &ArchiveBlobAad,
 ) -> Result<EncryptedArchiveBlob, JsError> {
-    let adk = provider.0.rand().random_vec(32).map_err(|e| JsError::new(&format!("{e:?}")))?;
-    let nonce = provider.0.rand().random_vec(12).map_err(|e| JsError::new(&format!("{e:?}")))?;
+    let adk = provider
+        .0
+        .rand()
+        .random_vec(32)
+        .map_err(|e| JsError::new(&format!("{e:?}")))?;
+    let nonce = provider
+        .0
+        .rand()
+        .random_vec(12)
+        .map_err(|e| JsError::new(&format!("{e:?}")))?;
     let aead_aad = aad.to_bytes()?;
     let ciphertext = provider
         .0
@@ -403,4 +482,61 @@ fn derive_pin_key(pin: &str, salt: &[u8], iterations: u32) -> [u8; 32] {
     let mut key = [0u8; 32];
     pbkdf2_hmac::<Sha256>(pin.as_bytes(), salt, iterations, &mut key);
     key
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+
+    #[test]
+    fn generation_zero_archive_aad_keeps_legacy_bytes() {
+        let aad = ArchiveBlobAad::new(
+            "messaging:cid".to_owned(),
+            7,
+            "account_owned".to_owned(),
+            "blob".to_owned(),
+            "snapshot".to_owned(),
+        );
+        let bytes = serde_json::to_vec(&aad).unwrap_or_default();
+        assert_eq!(
+            bytes,
+            br#"{"domain":"ermis-archive-blob-v1","cid":"messaging:cid","epoch":7,"scope":"account_owned","blob_id":"blob","snapshot_hash":"snapshot"}"#
+        );
+    }
+
+    #[test]
+    fn archive_domains_separate_same_epoch_across_generations() {
+        let generation_one = ArchiveBlobAad::for_generation(
+            "messaging:cid".to_owned(),
+            1,
+            7,
+            "account_owned".to_owned(),
+            "blob".to_owned(),
+            "snapshot".to_owned(),
+        );
+        let generation_two = ArchiveBlobAad::for_generation(
+            "messaging:cid".to_owned(),
+            2,
+            7,
+            "account_owned".to_owned(),
+            "blob".to_owned(),
+            "snapshot".to_owned(),
+        );
+        assert_ne!(
+            serde_json::to_vec(&generation_one).unwrap_or_default(),
+            serde_json::to_vec(&generation_two).unwrap_or_default()
+        );
+
+        let wrap = ArchiveKeyWrapInfo::for_generation(
+            "messaging:cid".to_owned(),
+            2,
+            7,
+            "account_owned".to_owned(),
+            "blob".to_owned(),
+            "snapshot".to_owned(),
+            "recovery-key".to_owned(),
+        );
+        let wrap_json = serde_json::to_value(&wrap).unwrap_or_default();
+        assert_eq!(wrap_json["group_generation"], 2);
+    }
 }

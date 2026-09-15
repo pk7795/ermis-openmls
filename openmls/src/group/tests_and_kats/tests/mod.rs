@@ -6,6 +6,7 @@ mod app_data_update_proposal_validation;
 
 mod capabilities_check;
 mod commit_validation;
+mod delayed_key_package_lifetime;
 mod encoding;
 mod external_add_proposal;
 mod external_commit;

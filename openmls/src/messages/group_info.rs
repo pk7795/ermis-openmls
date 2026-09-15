@@ -12,10 +12,10 @@ use tls_codec::{
 use crate::{
     binary_tree::LeafNodeIndex,
     ciphersuite::{
-        signable::{Signable, SignedStruct, Verifiable, VerifiedStruct},
         AeadKey, AeadNonce, Signature,
+        signable::{Signable, SignedStruct, Verifiable, VerifiedStruct},
     },
-    extensions::{errors::InvalidExtensionError, Extension, Extensions},
+    extensions::{Extension, Extensions, errors::InvalidExtensionError},
     group::{GroupContext, GroupEpoch, GroupId},
     messages::ConfirmationTag,
     prelude::ExtensionTypeNotValidInGroupInfoError,

@@ -11,6 +11,7 @@ pub enum MlsError {
     InvalidMessage,
     MessageAlreadyConsumed,
     InvalidCid,
+    InvalidGroupId,
     StorageError,
     GroupNotFound,
     CryptoError,
@@ -38,6 +39,9 @@ impl fmt::Display for MlsError {
                 )
             }
             MlsError::InvalidCid => write!(f, "MLS_INVALID_CID: Invalid CID format"),
+            MlsError::InvalidGroupId => {
+                write!(f, "MLS_INVALID_GROUP_ID: Invalid MLS GroupId")
+            }
             MlsError::StorageError => write!(f, "MLS_STORAGE_ERROR: Storage operation failed"),
             MlsError::GroupNotFound => {
                 write!(f, "MLS_GROUP_NOT_FOUND: Group not found in storage")

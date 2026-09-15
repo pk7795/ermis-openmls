@@ -7,12 +7,12 @@ use tls_codec::{Deserialize, DeserializeBytes, Serialize, Size};
 use crate::messages::proposals_in::GroupContextExtensionProposalIn;
 
 use super::{
+    CustomProposal,
     proposals::{
         ExternalInitProposal, PreSharedKeyProposal, Proposal, ProposalType, ReInitProposal,
         RemoveProposal,
     },
     proposals_in::{AddProposalIn, ProposalIn, UpdateProposalIn},
-    CustomProposal,
 };
 
 #[cfg(feature = "extensions-draft-08")]

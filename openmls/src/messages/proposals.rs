@@ -14,11 +14,11 @@ use tls_codec::{
 
 use crate::{
     binary_tree::array_representation::LeafNodeIndex,
-    ciphersuite::hash_ref::{make_proposal_ref, KeyPackageRef, ProposalRef},
+    ciphersuite::hash_ref::{KeyPackageRef, ProposalRef, make_proposal_ref},
     error::LibraryError,
     extensions::Extensions,
     framing::{
-        mls_auth_content::AuthenticatedContent, mls_content::FramedContentBody, ContentType,
+        ContentType, mls_auth_content::AuthenticatedContent, mls_content::FramedContentBody,
     },
     group::{GroupContext, GroupId},
     key_packages::*,

@@ -94,6 +94,44 @@ pub struct ProcessedMessage {
     pub aad: Vec<u8>,
 }
 
+pub struct ExportedEpochArchiveV2 {
+    pub archive_bytes: Vec<u8>,
+    pub snapshot_bytes: Vec<u8>,
+    pub snapshot_hash: Vec<u8>,
+}
+
+impl From<openmls_bindings_core::ExportedEpochArchiveV2> for ExportedEpochArchiveV2 {
+    fn from(value: openmls_bindings_core::ExportedEpochArchiveV2) -> Self {
+        Self {
+            archive_bytes: value.archive_bytes,
+            snapshot_bytes: value.snapshot_bytes,
+            snapshot_hash: value.snapshot_hash,
+        }
+    }
+}
+
+pub struct ArchivedMessage {
+    pub content: Vec<u8>,
+    pub sender_index: u32,
+    pub generation: u32,
+    pub epoch: u64,
+    pub aad: Vec<u8>,
+    pub own_message: bool,
+}
+
+impl From<openmls_bindings_core::ArchivedMessage> for ArchivedMessage {
+    fn from(value: openmls_bindings_core::ArchivedMessage) -> Self {
+        Self {
+            content: value.content,
+            sender_index: value.sender_index,
+            generation: value.generation,
+            epoch: value.epoch,
+            aad: value.aad,
+            own_message: value.own_message,
+        }
+    }
+}
+
 impl From<openmls_bindings_core::ProcessedMessage> for ProcessedMessage {
     fn from(value: openmls_bindings_core::ProcessedMessage) -> Self {
         Self {

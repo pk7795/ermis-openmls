@@ -9,6 +9,17 @@ The main goals are:
 
 ## POC Notes
 
+### 2026-09-03 - Typed partial-Welcome recovery boundary
+
+- Added `Group.join_with_welcome_typed(...)` without changing the legacy
+  `join_with_welcome(...)` API.
+- The typed method exposes stable `MlsErrorCode` and `code_name` values. Only
+  `NoMatchingKeyPackage` authorizes an automatic external-join fallback;
+  malformed input, invalid signatures or suites, and storage failures keep
+  their distinct failure path and fail closed.
+- This is source-level binding evidence. Generated WASM artifact promotion
+  remains a separate client/release task at the external-safe package pin.
+
 ### 2026-05-18 - Composite inline group changes
 
 - Mode: POC.

@@ -2,6 +2,8 @@
 
 use wasm_bindgen::prelude::*;
 
+use openmls::group::WelcomeError;
+
 /// Error codes for MLS operations
 #[wasm_bindgen]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +30,8 @@ pub enum MlsErrorCode {
     InvalidState,
     /// External commit failed
     ExternalCommitError,
+    /// A Welcome does not contain a KeyPackage owned by this provider
+    NoMatchingKeyPackage,
 }
 
 /// Custom error type for MLS operations
@@ -60,6 +64,27 @@ impl MlsError {
     pub fn message(&self) -> String {
         self.message.clone()
     }
+
+    /// Stable string representation for clients that cannot safely depend on
+    /// wasm-bindgen's numeric enum layout.
+    #[wasm_bindgen(getter)]
+    pub fn code_name(&self) -> String {
+        match self.code {
+            MlsErrorCode::SerializationError => "SerializationError",
+            MlsErrorCode::DeserializationError => "DeserializationError",
+            MlsErrorCode::GroupNotOperational => "GroupNotOperational",
+            MlsErrorCode::MemberNotFound => "MemberNotFound",
+            MlsErrorCode::InvalidMessage => "InvalidMessage",
+            MlsErrorCode::NoWelcome => "NoWelcome",
+            MlsErrorCode::InvalidCid => "InvalidCid",
+            MlsErrorCode::StorageError => "StorageError",
+            MlsErrorCode::CryptoError => "CryptoError",
+            MlsErrorCode::InvalidState => "InvalidState",
+            MlsErrorCode::ExternalCommitError => "ExternalCommitError",
+            MlsErrorCode::NoMatchingKeyPackage => "NoMatchingKeyPackage",
+        }
+        .to_string()
+    }
 }
 
 impl std::fmt::Display for MlsError {
@@ -70,6 +95,17 @@ impl std::fmt::Display for MlsError {
 
 // Helper to convert internal errors
 impl MlsError {
+    pub(crate) fn from_welcome_error<StorageError: std::fmt::Display>(
+        error: WelcomeError<StorageError>,
+    ) -> Self {
+        let code = match &error {
+            WelcomeError::NoMatchingKeyPackage => MlsErrorCode::NoMatchingKeyPackage,
+            WelcomeError::StorageError(_) => MlsErrorCode::StorageError,
+            _ => MlsErrorCode::InvalidMessage,
+        };
+        Self::new(code, &error.to_string())
+    }
+
     pub fn serialization(msg: &str) -> JsError {
         JsError::new(&format!("[SerializationError] {}", msg))
     }
@@ -108,5 +144,17 @@ impl MlsError {
 
     pub fn invalid_state(msg: &str) -> JsError {
         JsError::new(&format!("[InvalidState] {}", msg))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_matching_key_package_has_stable_typed_code() {
+        let error = MlsError::from_welcome_error(WelcomeError::<String>::NoMatchingKeyPackage);
+        assert_eq!(error.code(), MlsErrorCode::NoMatchingKeyPackage);
+        assert_eq!(error.code_name(), "NoMatchingKeyPackage");
     }
 }

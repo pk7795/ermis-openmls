@@ -3,7 +3,7 @@ use tls_codec::{Deserialize, Serialize};
 use crate::{
     ciphersuite::signable::Verifiable,
     extensions::{errors::InvalidExtensionError, *},
-    group::{mls_group::tests_and_kats::utils::setup_alice_group, ExportGroupInfoError},
+    group::{ExportGroupInfoError, mls_group::tests_and_kats::utils::setup_alice_group},
     messages::group_info::{GroupInfo, VerifiableGroupInfo},
     prelude::{ExtensionType, ExtensionTypeNotValidInGroupInfoError, MlsMessageBodyOut},
 };

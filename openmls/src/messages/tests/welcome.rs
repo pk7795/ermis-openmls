@@ -6,21 +6,21 @@ use tls_codec::{Deserialize, Serialize};
 use crate::{
     binary_tree::LeafNodeIndex,
     ciphersuite::{
-        hash_ref::KeyPackageRef, hpke, signable::Signable, AeadKey, AeadNonce, Mac, Secret,
+        AeadKey, AeadNonce, Mac, Secret, hash_ref::KeyPackageRef, hpke, signable::Signable,
     },
     extensions::Extensions,
     group::{
-        errors::WelcomeError, mls_group::tests_and_kats::utils::setup_client, GroupContext,
-        GroupId, MlsGroup, MlsGroupCreateConfig, ProcessedWelcome, StagedWelcome,
+        GroupContext, GroupId, MlsGroup, MlsGroupCreateConfig, ProcessedWelcome, StagedWelcome,
+        errors::WelcomeError, mls_group::tests_and_kats::utils::setup_client,
     },
     messages::{
-        group_info::{GroupInfoTBS, VerifiableGroupInfo},
         ConfirmationTag, EncryptedGroupSecrets, GroupSecrets, GroupSecretsError, Welcome,
+        group_info::{GroupInfoTBS, VerifiableGroupInfo},
     },
     prelude::ExtensionType,
     schedule::{
-        psk::{load_psks, store::ResumptionPskStore, PskSecret},
         KeySchedule,
+        psk::{PskSecret, load_psks, store::ResumptionPskStore},
     },
     treesync::node::encryption_keys::EncryptionKeyPair,
 };
@@ -414,9 +414,11 @@ fn no_external_pub_in_welcome() {
 
     // Check values in processed welcome
     let unverified_group_info = processed_welcome.unverified_group_info();
-    assert!(!unverified_group_info
-        .extensions()
-        .contains(ExtensionType::ExternalPub));
+    assert!(
+        !unverified_group_info
+            .extensions()
+            .contains(ExtensionType::ExternalPub)
+    );
 }
 
 #[test]
