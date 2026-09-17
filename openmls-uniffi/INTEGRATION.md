@@ -1,5 +1,8 @@
 # OpenMLS UniFFI — Integration & Testing Guide
 
+Release provenance and consumer handoff requirements are in
+[`../MLS_UPGRADE_HANDOFF.md`](../MLS_UPGRADE_HANDOFF.md).
+
 ## 1. Build the Library
 
 ```bash

@@ -1,5 +1,8 @@
 # OpenMLS Wasm Bindings Experiment
 
+Release/handoff steps for the generated WASM set are in
+[`../MLS_UPGRADE_HANDOFF.md`](../MLS_UPGRADE_HANDOFF.md).
+
 This repo is a step on the way to proper Wasm support for OpenMLS.
 The main goals are:
 
