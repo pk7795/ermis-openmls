@@ -146,6 +146,8 @@ impl PublicGroup {
         proposal_store: ProposalStore,
         validate_lifetimes: LeafNodeLifetimePolicy,
     ) -> Result<(Self, GroupInfo), CreationFromExternalError<StorageError>> {
+        // One clock sample for the entire join-tree operation, regardless of N.
+        let operation_time = crate::key_packages::Lifetime::current_time();
         let ciphersuite = verifiable_group_info.ciphersuite();
 
         let group_id = verifiable_group_info.group_id();
@@ -283,7 +285,11 @@ impl PublicGroup {
             .treesync
             .full_leaves()
             .try_for_each(|leaf_node| {
-                public_group.validate_leaf_node_inner(leaf_node, validate_lifetimes)
+                public_group.validate_leaf_node_inner_at(
+                    leaf_node,
+                    validate_lifetimes,
+                    operation_time,
+                )
             })?;
 
         Ok((public_group, group_info))

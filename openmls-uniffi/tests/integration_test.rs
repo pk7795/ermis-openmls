@@ -33,7 +33,7 @@ fn create_provider() -> Arc<Provider> {
 }
 
 fn create_identity(provider: Arc<Provider>, name: &str) -> Arc<Identity> {
-    Arc::new(Identity::new(provider, name.to_string()).unwrap())
+    Arc::new(Identity::new(provider, name.to_string()).fixture_value())
 }
 
 fn create_group_alice_and_bob() -> AliceBobGroup {
@@ -49,24 +49,24 @@ fn create_group_alice_and_bob() -> AliceBobGroup {
             alice.clone(),
             "team:chess_club".into(),
         )
-        .unwrap(),
+        .fixture_value(),
     );
 
-    let bob_key_pkg = bob.key_package(bob_provider.clone());
+    let bob_key_pkg = bob.key_package(bob_provider.clone()).fixture_value();
 
     let add_result = chess_club_alice
         .add_members(alice_provider.clone(), alice.clone(), vec![bob_key_pkg])
-        .unwrap();
+        .fixture_value();
 
     chess_club_alice
         .merge_pending_commit(alice_provider.clone())
-        .unwrap();
+        .fixture_value();
 
     let ratchet_tree = chess_club_alice.export_ratchet_tree();
-    let welcome = add_result.welcome.expect("Should have welcome");
+    let welcome = add_result.welcome.fixture_value();
 
     let chess_club_bob = Arc::new(
-        Group::join_with_welcome(bob_provider.clone(), welcome, Some(ratchet_tree)).unwrap(),
+        Group::join_with_welcome(bob_provider.clone(), welcome, Some(ratchet_tree)).fixture_value(),
     );
 
     (
@@ -94,7 +94,7 @@ fn create_group_alice_bob_dave() -> AliceBobDaveGroup {
             alice.clone(),
             "team:wrapper_test".into(),
         )
-        .unwrap(),
+        .fixture_value(),
     );
 
     let add_result = alice_group
@@ -102,20 +102,21 @@ fn create_group_alice_bob_dave() -> AliceBobDaveGroup {
             alice_provider.clone(),
             alice.clone(),
             vec![
-                bob.key_package(bob_provider),
-                dave.key_package(dave_provider.clone()),
+                bob.key_package(bob_provider).fixture_value(),
+                dave.key_package(dave_provider.clone()).fixture_value(),
             ],
         )
-        .unwrap();
+        .fixture_value();
 
     alice_group
         .merge_pending_commit(alice_provider.clone())
-        .unwrap();
+        .fixture_value();
 
     let ratchet_tree = alice_group.export_ratchet_tree();
-    let welcome = add_result.welcome.expect("Should have welcome");
+    let welcome = add_result.welcome.fixture_value();
     let dave_group = Arc::new(
-        Group::join_with_welcome(dave_provider.clone(), welcome, Some(ratchet_tree)).unwrap(),
+        Group::join_with_welcome(dave_provider.clone(), welcome, Some(ratchet_tree))
+            .fixture_value(),
     );
 
     (
@@ -135,7 +136,7 @@ fn create_group_alice_bob_dave() -> AliceBobDaveGroup {
 fn test_provider_creation() {
     let provider = create_provider();
     // Provider should be usable
-    let _identity = Identity::new(provider, "test_user".to_string()).unwrap();
+    let _identity = Identity::new(provider, "test_user".to_string()).fixture_value();
 }
 
 #[test]
@@ -150,8 +151,8 @@ fn test_identity_serialization() {
     let provider = create_provider();
     let alice = create_identity(provider.clone(), "alice_user_123");
 
-    let bytes = alice.to_bytes().unwrap();
-    let restored = Identity::from_bytes(provider, bytes).unwrap();
+    let bytes = alice.to_bytes().fixture_value();
+    let restored = Identity::from_bytes(provider, bytes).fixture_value();
 
     assert_eq!(restored.user_id(), "alice_user_123");
 }
@@ -160,13 +161,13 @@ fn test_identity_serialization() {
 fn test_key_package_serialization() {
     let provider = create_provider();
     let alice = create_identity(provider.clone(), "alice");
-    let kp = alice.key_package(provider);
+    let kp = alice.key_package(provider).fixture_value();
 
-    let bytes = kp.to_bytes();
+    let bytes = kp.to_bytes().fixture_value();
     assert!(!bytes.is_empty());
 
-    let restored = KeyPackage::from_bytes(bytes).unwrap();
-    assert!(!restored.to_bytes().is_empty());
+    let restored = KeyPackage::from_bytes(bytes).fixture_value();
+    assert!(!restored.to_bytes().fixture_value().is_empty());
 }
 
 #[test]
@@ -175,8 +176,8 @@ fn test_cid_roundtrip() {
     let alice = create_identity(provider.clone(), "alice");
     let cid = "team:my_channel_123";
 
-    let group = Group::create_with_cid(provider, alice, cid.to_string()).unwrap();
-    assert_eq!(group.cid().unwrap(), cid);
+    let group = Group::create_with_cid(provider, alice, cid.to_string()).fixture_value();
+    assert_eq!(group.cid().fixture_value(), cid);
 }
 
 #[test]
@@ -187,10 +188,10 @@ fn test_group_creation_and_join() {
     // Both should have the same exported key
     let bob_key = chess_club_bob
         .export_key(bob_provider, "test_key".into(), vec![0x30], 32)
-        .unwrap();
+        .fixture_value();
     let alice_key = chess_club_alice
         .export_key(alice_provider, "test_key".into(), vec![0x30], 32)
-        .unwrap();
+        .fixture_value();
 
     assert_eq!(bob_key, alice_key);
 }
@@ -207,19 +208,21 @@ fn test_welcome_for_different_provider_returns_typed_no_matching_key_package() {
         alice.clone(),
         "team:typed_welcome_error".into(),
     )
-    .unwrap();
+    .fixture_value();
     let add_result = alice_group
         .add_members(
             alice_provider.clone(),
             alice,
-            vec![bob.key_package(bob_provider)],
+            vec![bob.key_package(bob_provider).fixture_value()],
         )
-        .unwrap();
-    alice_group.merge_pending_commit(alice_provider).unwrap();
+        .fixture_value();
+    alice_group
+        .merge_pending_commit(alice_provider)
+        .fixture_value();
 
     let result = Group::join_with_welcome(
         unrelated_provider,
-        add_result.welcome.expect("welcome must be generated"),
+        add_result.welcome.fixture_value(),
         Some(alice_group.export_ratchet_tree()),
     );
 
@@ -234,19 +237,19 @@ fn test_encrypted_messaging() {
     let plaintext = b"Hello, Bob!";
     let ciphertext = chess_club_alice
         .create_message(alice_provider, alice, plaintext.to_vec())
-        .unwrap();
+        .fixture_value();
 
     let processed = chess_club_bob
         .process_message(bob_provider, ciphertext)
-        .unwrap();
+        .fixture_value();
 
     assert_eq!(processed.message_type, MessageType::ApplicationMessage);
-    assert_eq!(processed.content.unwrap(), plaintext.to_vec());
+    assert_eq!(processed.content.fixture_value(), plaintext.to_vec());
 }
 
 #[test]
-fn test_v2_epoch_archive_decrypts_and_rejects_untrusted_snapshot()
--> Result<(), Box<dyn std::error::Error>> {
+fn test_v2_epoch_archive_decrypts_and_rejects_untrusted_snapshot(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (alice_provider, alice, alice_group, bob_provider, _, bob_group) =
         create_group_alice_and_bob();
     let exported = bob_group.archive_epoch_v2()?;
@@ -293,14 +296,14 @@ fn test_encrypted_messaging_with_aad() {
 
     let ciphertext = chess_club_alice
         .create_message_with_aad(alice_provider, alice, plaintext.to_vec(), aad.to_vec())
-        .unwrap();
+        .fixture_value();
 
     let processed = chess_club_bob
         .process_message(bob_provider, ciphertext)
-        .unwrap();
+        .fixture_value();
 
     assert_eq!(processed.message_type, MessageType::ApplicationMessage);
-    assert_eq!(processed.content.unwrap(), plaintext.to_vec());
+    assert_eq!(processed.content.fixture_value(), plaintext.to_vec());
     assert_eq!(processed.aad, aad.to_vec());
 }
 
@@ -315,27 +318,28 @@ fn test_proposal_commit_separation() {
     let charlie = create_identity(charlie_provider.clone(), "charlie");
 
     let group = Arc::new(
-        Group::create_with_cid(alice_provider.clone(), alice.clone(), "team:test".into()).unwrap(),
+        Group::create_with_cid(alice_provider.clone(), alice.clone(), "team:test".into())
+            .fixture_value(),
     );
 
-    let bob_kp = bob.key_package(bob_provider);
-    let charlie_kp = charlie.key_package(charlie_provider);
+    let bob_kp = bob.key_package(bob_provider).fixture_value();
+    let charlie_kp = charlie.key_package(charlie_provider).fixture_value();
 
     let _prop1 = group
         .propose_add_member(alice_provider.clone(), alice.clone(), bob_kp)
-        .unwrap();
+        .fixture_value();
     let _prop2 = group
         .propose_add_member(alice_provider.clone(), alice.clone(), charlie_kp)
-        .unwrap();
+        .fixture_value();
 
     assert_eq!(group.pending_proposals_count(), 2);
 
     let commit_bundle = group
         .commit_pending_proposals(alice_provider.clone(), alice)
-        .unwrap();
+        .fixture_value();
     assert!(commit_bundle.welcome.is_some());
 
-    group.merge_pending_commit(alice_provider).unwrap();
+    group.merge_pending_commit(alice_provider).fixture_value();
 
     let members = group.members();
     assert_eq!(members.len(), 3); // alice, bob, charlie
@@ -354,16 +358,18 @@ fn test_commit_group_changes_processes_without_standalone_proposals() {
             alice_provider.clone(),
             alice.clone(),
             vec!["bob".to_string()],
-            vec![charlie.key_package(charlie_provider)],
+            vec![charlie.key_package(charlie_provider).fixture_value()],
             false,
         )
-        .unwrap();
+        .fixture_value();
     assert!(composite.welcome.is_some());
 
     dave_group
         .process_message(dave_provider.clone(), composite.commit)
-        .unwrap();
-    alice_group.merge_pending_commit(alice_provider).unwrap();
+        .fixture_value();
+    alice_group
+        .merge_pending_commit(alice_provider)
+        .fixture_value();
 
     assert_eq!(alice_group.epoch(), epoch_before + 1);
     assert!(alice_group.member_by_user_id("bob".into()).is_none());
@@ -385,15 +391,17 @@ fn test_commit_member_add_with_removals_wrapper() {
             alice_provider.clone(),
             alice.clone(),
             vec!["bob".to_string()],
-            vec![charlie.key_package(charlie_provider)],
+            vec![charlie.key_package(charlie_provider).fixture_value()],
         )
-        .unwrap();
+        .fixture_value();
     assert!(composite.welcome.is_some());
 
     dave_group
         .process_message(dave_provider.clone(), composite.commit)
-        .unwrap();
-    alice_group.merge_pending_commit(alice_provider).unwrap();
+        .fixture_value();
+    alice_group
+        .merge_pending_commit(alice_provider)
+        .fixture_value();
 
     assert_eq!(alice_group.epoch(), epoch_before + 1);
     assert!(alice_group.member_by_user_id("bob".into()).is_none());
@@ -414,13 +422,15 @@ fn test_commit_self_update_with_removals_wrapper() {
             alice.clone(),
             vec!["bob".to_string()],
         )
-        .unwrap();
+        .fixture_value();
     assert!(composite.welcome.is_none());
 
     dave_group
         .process_message(dave_provider.clone(), composite.commit)
-        .unwrap();
-    alice_group.merge_pending_commit(alice_provider).unwrap();
+        .fixture_value();
+    alice_group
+        .merge_pending_commit(alice_provider)
+        .fixture_value();
 
     assert_eq!(alice_group.epoch(), epoch_before + 1);
     assert!(alice_group.member_by_user_id("bob".into()).is_none());
@@ -439,13 +449,15 @@ fn test_commit_member_removals_wrapper() {
             alice.clone(),
             vec!["bob".to_string()],
         )
-        .unwrap();
+        .fixture_value();
     assert!(composite.welcome.is_none());
 
     dave_group
         .process_message(dave_provider.clone(), composite.commit)
-        .unwrap();
-    alice_group.merge_pending_commit(alice_provider).unwrap();
+        .fixture_value();
+    alice_group
+        .merge_pending_commit(alice_provider)
+        .fixture_value();
 
     assert_eq!(alice_group.epoch(), epoch_before + 1);
     assert!(alice_group.member_by_user_id("bob".into()).is_none());
@@ -461,11 +473,11 @@ fn test_member_info() {
 
     let alice_member = chess_club_alice.member_by_user_id("alice".into());
     assert!(alice_member.is_some());
-    assert_eq!(alice_member.unwrap().user_id, "alice");
+    assert_eq!(alice_member.fixture_value().user_id, "alice");
 
     let bob_member = chess_club_alice.member_by_user_id("bob".into());
     assert!(bob_member.is_some());
-    assert_eq!(bob_member.unwrap().user_id, "bob");
+    assert_eq!(bob_member.fixture_value().user_id, "bob");
 }
 
 #[test]
@@ -486,7 +498,7 @@ fn test_ratchet_tree_serialization() {
     let bytes = tree.to_bytes();
     assert!(!bytes.is_empty());
 
-    let restored = RatchetTree::from_bytes(bytes).unwrap();
+    let restored = RatchetTree::from_bytes(bytes).fixture_value();
     assert!(!restored.to_bytes().is_empty());
 }
 
@@ -499,16 +511,16 @@ fn test_self_update() {
 
     let commit = chess_club_alice
         .self_update(alice_provider.clone(), alice)
-        .unwrap();
+        .fixture_value();
 
     chess_club_alice
         .merge_pending_commit(alice_provider)
-        .unwrap();
+        .fixture_value();
 
     // Process the commit on bob's side
     chess_club_bob
         .process_message(bob_provider, commit.commit)
-        .unwrap();
+        .fixture_value();
 
     assert!(chess_club_alice.epoch() > epoch_before);
 }
@@ -521,21 +533,21 @@ fn test_remove_member() {
     // Alice removes Bob
     let bob_index = chess_club_alice
         .member_by_user_id("bob".into())
-        .unwrap()
+        .fixture_value()
         .index;
 
     let commit = chess_club_alice
         .remove_members(alice_provider.clone(), alice, vec![bob_index])
-        .unwrap();
+        .fixture_value();
 
     chess_club_alice
         .merge_pending_commit(alice_provider)
-        .unwrap();
+        .fixture_value();
 
     // Process removal on Bob's side
     chess_club_bob
         .process_message(bob_provider, commit.commit)
-        .unwrap();
+        .fixture_value();
 
     // Alice's group should only have 1 member now
     assert_eq!(chess_club_alice.members().len(), 1);
@@ -548,20 +560,20 @@ fn test_remove_member() {
 #[test]
 fn test_persistent_provider_creation() {
     let dir = std::env::temp_dir().join("openmls_test_persistent.db");
-    let db_path = dir.to_str().unwrap().to_string();
+    let db_path = dir.to_str().fixture_value().to_string();
 
     // Clean up from previous runs
     let _ = std::fs::remove_file(&db_path);
 
-    let provider = Arc::new(Provider::new_with_path(db_path.clone()).unwrap());
-    let identity = Arc::new(Identity::new(provider.clone(), "alice".to_string()).unwrap());
+    let provider = Arc::new(Provider::new_with_path(db_path.clone()).fixture_value());
+    let identity = Arc::new(Identity::new(provider.clone(), "alice".to_string()).fixture_value());
     assert_eq!(identity.user_id(), "alice");
 
     // Should be able to create a group
     let group =
         Group::create_with_cid(provider.clone(), identity.clone(), "test:persistent".into())
-            .unwrap();
-    assert_eq!(group.cid().unwrap(), "test:persistent");
+            .fixture_value();
+    assert_eq!(group.cid().fixture_value(), "test:persistent");
 
     // Clean up
     let _ = std::fs::remove_file(&db_path);
@@ -570,17 +582,18 @@ fn test_persistent_provider_creation() {
 #[test]
 fn test_persistent_provider_full_flow() {
     let dir = std::env::temp_dir().join("openmls_test_full_flow.db");
-    let db_path = dir.to_str().unwrap().to_string();
+    let db_path = dir.to_str().fixture_value().to_string();
 
     // Clean up from previous runs
     let _ = std::fs::remove_file(&db_path);
 
     // Create two persistent providers (simulating two different users on the same device)
-    let alice_provider = Arc::new(Provider::new_with_path(db_path.clone()).unwrap());
+    let alice_provider = Arc::new(Provider::new_with_path(db_path.clone()).fixture_value());
     let bob_provider = Arc::new(Provider::new());
 
-    let alice = Arc::new(Identity::new(alice_provider.clone(), "alice".to_string()).unwrap());
-    let bob = Arc::new(Identity::new(bob_provider.clone(), "bob".to_string()).unwrap());
+    let alice =
+        Arc::new(Identity::new(alice_provider.clone(), "alice".to_string()).fixture_value());
+    let bob = Arc::new(Identity::new(bob_provider.clone(), "bob".to_string()).fixture_value());
 
     // Create group and add bob
     let group = Arc::new(
@@ -589,32 +602,36 @@ fn test_persistent_provider_full_flow() {
             alice.clone(),
             "team:persistent".into(),
         )
-        .unwrap(),
+        .fixture_value(),
     );
 
-    let bob_kp = bob.key_package(bob_provider.clone());
+    let bob_kp = bob.key_package(bob_provider.clone()).fixture_value();
     let add_result = group
         .add_members(alice_provider.clone(), alice.clone(), vec![bob_kp])
-        .unwrap();
-    group.merge_pending_commit(alice_provider.clone()).unwrap();
+        .fixture_value();
+    group
+        .merge_pending_commit(alice_provider.clone())
+        .fixture_value();
 
-    let welcome = add_result.welcome.expect("Should have welcome");
+    let welcome = add_result.welcome.fixture_value();
     let ratchet_tree = group.export_ratchet_tree();
 
     let bob_group = Arc::new(
-        Group::join_with_welcome(bob_provider.clone(), welcome, Some(ratchet_tree)).unwrap(),
+        Group::join_with_welcome(bob_provider.clone(), welcome, Some(ratchet_tree)).fixture_value(),
     );
 
     // Messaging should work
     let plaintext = b"Hello from persistent storage!";
     let ciphertext = group
         .create_message(alice_provider.clone(), alice, plaintext.to_vec())
-        .unwrap();
+        .fixture_value();
 
-    let processed = bob_group.process_message(bob_provider, ciphertext).unwrap();
+    let processed = bob_group
+        .process_message(bob_provider, ciphertext)
+        .fixture_value();
 
     assert_eq!(processed.message_type, MessageType::ApplicationMessage);
-    assert_eq!(processed.content.unwrap(), plaintext.to_vec());
+    assert_eq!(processed.content.fixture_value(), plaintext.to_vec());
 
     // Clean up
     let _ = std::fs::remove_file(&db_path);
@@ -623,21 +640,21 @@ fn test_persistent_provider_full_flow() {
 #[test]
 fn test_load_group_from_storage() {
     let dir = std::env::temp_dir().join("openmls_test_load_group.db");
-    let db_path = dir.to_str().unwrap().to_string();
+    let db_path = dir.to_str().fixture_value().to_string();
     let _ = std::fs::remove_file(&db_path);
 
     let cid = "test:load_group";
 
     // Phase 1: Create group with persistent provider
-    let provider = Arc::new(Provider::new_with_path(db_path.clone()).unwrap());
-    let alice = Arc::new(Identity::new(provider.clone(), "alice".to_string()).unwrap());
+    let provider = Arc::new(Provider::new_with_path(db_path.clone()).fixture_value());
+    let alice = Arc::new(Identity::new(provider.clone(), "alice".to_string()).fixture_value());
 
-    let group = Group::create_with_cid(provider.clone(), alice.clone(), cid.into()).unwrap();
-    assert_eq!(group.cid().unwrap(), cid);
+    let group = Group::create_with_cid(provider.clone(), alice.clone(), cid.into()).fixture_value();
+    assert_eq!(group.cid().fixture_value(), cid);
     assert_eq!(group.epoch(), 0);
 
     // Verify stored_group_ids returns the CID
-    let ids = provider.stored_group_ids().unwrap();
+    let ids = provider.stored_group_ids().fixture_value();
     assert!(
         ids.contains(&cid.to_string()),
         "Expected CID in stored groups: {:?}",
@@ -645,8 +662,8 @@ fn test_load_group_from_storage() {
     );
 
     // Phase 2: Load the group from storage (simulate app restart with same DB)
-    let loaded = Group::load_from_storage(provider.clone(), cid.into()).unwrap();
-    assert_eq!(loaded.cid().unwrap(), cid);
+    let loaded = Group::load_from_storage(provider.clone(), cid.into()).fixture_value();
+    assert_eq!(loaded.cid().fixture_value(), cid);
     assert_eq!(loaded.epoch(), 0);
     assert_eq!(loaded.members().len(), 1);
 
@@ -657,35 +674,37 @@ fn test_load_group_from_storage() {
 #[test]
 fn test_group_management() {
     let dir = std::env::temp_dir().join("openmls_test_group_mgmt.db");
-    let db_path = dir.to_str().unwrap().to_string();
+    let db_path = dir.to_str().fixture_value().to_string();
     let _ = std::fs::remove_file(&db_path);
 
-    let provider = Arc::new(Provider::new_with_path(db_path.clone()).unwrap());
-    let alice = Arc::new(Identity::new(provider.clone(), "alice".to_string()).unwrap());
+    let provider = Arc::new(Provider::new_with_path(db_path.clone()).fixture_value());
+    let alice = Arc::new(Identity::new(provider.clone(), "alice".to_string()).fixture_value());
 
     // Initially no groups
-    assert_eq!(provider.group_count().unwrap(), 0);
-    assert!(provider.stored_group_ids().unwrap().is_empty());
+    assert_eq!(provider.group_count().fixture_value(), 0);
+    assert!(provider.stored_group_ids().fixture_value().is_empty());
 
     // Create 2 groups
-    let _g1 = Group::create_with_cid(provider.clone(), alice.clone(), "ch:one".into()).unwrap();
-    let _g2 = Group::create_with_cid(provider.clone(), alice.clone(), "ch:two".into()).unwrap();
+    let _g1 =
+        Group::create_with_cid(provider.clone(), alice.clone(), "ch:one".into()).fixture_value();
+    let _g2 =
+        Group::create_with_cid(provider.clone(), alice.clone(), "ch:two".into()).fixture_value();
 
-    assert_eq!(provider.group_count().unwrap(), 2);
-    let ids = provider.stored_group_ids().unwrap();
+    assert_eq!(provider.group_count().fixture_value(), 2);
+    let ids = provider.stored_group_ids().fixture_value();
     assert!(ids.contains(&"ch:one".to_string()));
     assert!(ids.contains(&"ch:two".to_string()));
 
     // Delete one group
-    provider.delete_group("ch:one".into()).unwrap();
-    assert_eq!(provider.group_count().unwrap(), 1);
-    let ids = provider.stored_group_ids().unwrap();
+    provider.delete_group("ch:one".into()).fixture_value();
+    assert_eq!(provider.group_count().fixture_value(), 1);
+    let ids = provider.stored_group_ids().fixture_value();
     assert!(!ids.contains(&"ch:one".to_string()));
     assert!(ids.contains(&"ch:two".to_string()));
 
     // Delete all
-    provider.delete_all_groups().unwrap();
-    assert_eq!(provider.group_count().unwrap(), 0);
+    provider.delete_all_groups().fixture_value();
+    assert_eq!(provider.group_count().fixture_value(), 0);
 
     let _ = std::fs::remove_file(&db_path);
 }
@@ -693,34 +712,59 @@ fn test_group_management() {
 #[test]
 fn test_identity_persistence() {
     let dir = std::env::temp_dir().join("openmls_test_identity_persist.db");
-    let db_path = dir.to_str().unwrap().to_string();
+    let db_path = dir.to_str().fixture_value().to_string();
     let _ = std::fs::remove_file(&db_path);
 
-    let provider = Arc::new(Provider::new_with_path(db_path.clone()).unwrap());
+    let provider = Arc::new(Provider::new_with_path(db_path.clone()).fixture_value());
 
     // Initially no identity
-    assert!(provider.load_identity().unwrap().is_none());
+    assert!(provider.load_identity().fixture_value().is_none());
 
     // Create identity and store it
-    let alice = Arc::new(Identity::new(provider.clone(), "alice".to_string()).unwrap());
-    let identity_bytes = alice.to_bytes().unwrap();
+    let alice = Arc::new(Identity::new(provider.clone(), "alice".to_string()).fixture_value());
+    let identity_bytes = alice.to_bytes().fixture_value();
     provider
         .store_identity("alice".to_string(), identity_bytes.clone())
-        .unwrap();
+        .fixture_value();
 
     // Load identity back
-    let loaded = provider.load_identity().unwrap();
+    let loaded = provider.load_identity().fixture_value();
     assert!(loaded.is_some());
-    let loaded_bytes = loaded.unwrap();
+    let loaded_bytes = loaded.fixture_value();
     assert_eq!(loaded_bytes, identity_bytes);
 
     // Restore identity from loaded bytes
-    let restored = Identity::from_bytes(provider.clone(), loaded_bytes).unwrap();
+    let restored = Identity::from_bytes(provider.clone(), loaded_bytes).fixture_value();
     assert_eq!(restored.user_id(), "alice");
 
     // Delete identity
-    provider.delete_identity().unwrap();
-    assert!(provider.load_identity().unwrap().is_none());
+    provider.delete_identity().fixture_value();
+    assert!(provider.load_identity().fixture_value().is_none());
 
     let _ = std::fs::remove_file(&db_path);
+}
+
+// These pre-existing fixtures fail loudly on any unexpected error; no panic
+// convenience methods, and no private payloads in fixture error messages.
+trait FixtureValue {
+    type Value;
+    fn fixture_value(self) -> Self::Value;
+}
+impl<T, E> FixtureValue for Result<T, E> {
+    type Value = T;
+    fn fixture_value(self) -> T {
+        match self {
+            Ok(value) => value,
+            Err(_) => panic!("invalid UniFFI integration fixture"),
+        }
+    }
+}
+impl<T> FixtureValue for Option<T> {
+    type Value = T;
+    fn fixture_value(self) -> T {
+        match self {
+            Some(value) => value,
+            None => panic!("missing UniFFI integration fixture value"),
+        }
+    }
 }

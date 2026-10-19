@@ -31,13 +31,14 @@
 //! use openmls_rust_crypto::OpenMlsRustCrypto;
 //! use openmls_basic_credential::SignatureKeyPair;
 //!
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 //! let provider = OpenMlsRustCrypto::default();
 //!
 //! let credential = BasicCredential::new("identity".into());
 //! let signer =
 //!     SignatureKeyPair::new(ciphersuite.signature_algorithm())
-//!         .expect("Error generating a signature key pair.");
+//!         ?;
 //! let credential_with_key = CredentialWithKey {
 //!     credential: credential.into(),
 //!     signature_key: signer.public().into(),
@@ -49,7 +50,9 @@
 //!         &signer,
 //!         credential_with_key,
 //!     )
-//!     .unwrap();
+//!     ?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! See [`KeyPackage`] for more details and other ways to create key packages.
@@ -64,6 +67,7 @@
 //! use openmls::test_utils::hex_to_bytes;
 //! use openmls_rust_crypto::OpenMlsRustCrypto;
 //!
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let provider = OpenMlsRustCrypto::default();
 //! let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 //!
@@ -79,11 +83,13 @@
 //!         CDC33F56A10E425A384AED029C23E1D467C0E");
 //!
 //! let key_package_in = KeyPackageIn::tls_deserialize(&mut key_package_bytes.as_slice())
-//!     .expect("Could not deserialize KeyPackage");
+//!     ?;
 //!
 //! let key_package = key_package_in
 //!     .validate(provider.crypto(), ProtocolVersion::Mls10)
-//!     .expect("Invalid KeyPackage");
+//!     ?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! See [`KeyPackage`] for more details on how to use key packages.
@@ -123,6 +129,7 @@ pub mod errors;
 pub mod key_package_in;
 
 mod lifetime;
+pub(crate) use lifetime::unix_time_seconds;
 
 // Tests
 #[cfg(test)]
@@ -130,7 +137,7 @@ pub(crate) mod tests;
 
 // Public types
 pub use key_package_in::KeyPackageIn;
-pub use lifetime::Lifetime;
+pub use lifetime::{Lifetime, LifetimeCreationError, MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS};
 
 /// The unsigned payload of a key package.
 /// Any modification must happen on this unsigned struct. Use `sign` to get a
@@ -426,10 +433,13 @@ impl KeyPackage {
 
     /// Get the lifetime of the KeyPackage
     pub fn life_time(&self) -> &Lifetime {
-        // Leaf nodes contain a lifetime if an only if they are inside a KeyPackage. Since we are
-        // in a KeyPackage, this can never be None and unwrap is safe.
-        // TODO: get rid of the unwrap, see https://github.com/openmls/openmls/issues/1663.
-        self.payload.leaf_node.life_time().unwrap()
+        // Validated KeyPackages always carry a lifetime. A malformed internal
+        // object returns an explicitly invalid range, so consumers fail closed.
+        static INVALID_LIFETIME: Lifetime = Lifetime::init(0, 0);
+        self.payload
+            .leaf_node
+            .life_time()
+            .unwrap_or(&INVALID_LIFETIME)
     }
 }
 
@@ -497,20 +507,21 @@ impl KeyPackageBuilder {
 
     /// Ensure that a last-resort extension is present in the key package if the
     /// `last_resort` flag is set.
-    fn ensure_last_resort(&mut self) {
+    fn ensure_last_resort(&mut self) -> Result<(), KeyPackageNewError> {
         if self.last_resort {
             let last_resort_extension = Extension::LastResort(LastResortExtension::default());
             if let Some(extensions) = self.key_package_extensions.as_mut() {
                 extensions
                     .add_or_replace(last_resort_extension)
-                    .expect("LastResort extensions are allowed in key packages");
+                    .map_err(|_| LibraryError::custom("invalid last-resort extension"))?;
             } else {
                 self.key_package_extensions = Some(
                     Extensions::single(last_resort_extension)
-                        .expect("LastResort extensions are allowed in key packages"),
+                        .map_err(|_| LibraryError::custom("invalid last-resort extension"))?,
                 );
             }
         }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -521,13 +532,16 @@ impl KeyPackageBuilder {
         signer: &impl Signer,
         credential_with_key: CredentialWithKey,
     ) -> Result<KeyPackageCreationResult, KeyPackageNewError> {
-        self.ensure_last_resort();
+        self.ensure_last_resort()?;
         KeyPackage::create(
             ciphersuite,
             provider,
             signer,
             credential_with_key,
-            self.key_package_lifetime.unwrap_or_default(),
+            match self.key_package_lifetime {
+                Some(lifetime) => lifetime,
+                None => Lifetime::try_default()?,
+            },
             self.key_package_extensions.unwrap_or_default(),
             self.leaf_node_capabilities.unwrap_or_default(),
             self.leaf_node_extensions.unwrap_or_default(),
@@ -542,7 +556,7 @@ impl KeyPackageBuilder {
         signer: &impl Signer,
         credential_with_key: CredentialWithKey,
     ) -> Result<KeyPackageBundle, KeyPackageNewError> {
-        self.ensure_last_resort();
+        self.ensure_last_resort()?;
 
         let KeyPackageCreationResult {
             key_package,
@@ -553,7 +567,10 @@ impl KeyPackageBuilder {
             provider,
             signer,
             credential_with_key,
-            self.key_package_lifetime.unwrap_or_default(),
+            match self.key_package_lifetime {
+                Some(lifetime) => lifetime,
+                None => Lifetime::try_default()?,
+            },
             self.key_package_extensions.unwrap_or_default(),
             self.leaf_node_capabilities.unwrap_or_default(),
             self.leaf_node_extensions.unwrap_or_default(),
@@ -637,8 +654,9 @@ impl KeyPackageBundle {
         ciphersuite: Ciphersuite,
         credential_with_key: CredentialWithKey,
     ) -> Self {
-        KeyPackage::builder()
-            .build(ciphersuite, provider, signer, credential_with_key)
-            .unwrap()
+        match KeyPackage::builder().build(ciphersuite, provider, signer, credential_with_key) {
+            Ok(bundle) => bundle,
+            Err(error) => panic!("test fixture KeyPackage generation failed: {error:?}"),
+        }
     }
 }

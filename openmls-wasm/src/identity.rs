@@ -10,7 +10,7 @@ use openmls_traits::OpenMlsProvider;
 use tls_codec::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
-use crate::{Provider, CIPHERSUITE};
+use crate::{MlsError, MlsErrorCode, Provider, CIPHERSUITE};
 
 /// Represents a user's MLS identity with credentials and signing keys
 #[wasm_bindgen]
@@ -54,9 +54,88 @@ impl Identity {
         self.user_id.clone()
     }
 
+    /// Signs only a validated, domain-separated LOR control request.
+    pub fn lor_request_signature(&self, context_json: String) -> Result<Vec<u8>, JsError> {
+        use openmls_traits::signatures::Signer;
+        let context = ermis_lor_request_proof::SigningContext::parse(&context_json)
+            .map_err(|_| JsError::new("Invalid LOR request context"))?;
+        let payload = context.payload(&self.user_id, CIPHERSUITE as u16)
+            .map_err(|_| JsError::new("Invalid LOR request context"))?;
+        self.keypair.sign(&payload).map_err(|_| JsError::new("LOR request proof failed"))
+    }
+
+    pub fn signature_public_key(&self) -> Vec<u8> {
+        self.keypair.public().to_vec()
+    }
+
+    pub fn device_registration_signature(
+        &self,
+        device_id: String,
+        project_id: String,
+        issued_at: i64,
+    ) -> Result<Vec<u8>, JsError> {
+        use openmls_traits::signatures::Signer;
+        if device_id.is_empty()
+            || device_id.len() > 256
+            || device_id.chars().any(char::is_control)
+            || issued_at <= 0
+            || project_id.len() != 36
+        {
+            return Err(JsError::new("Invalid device registration context"));
+        }
+        let payload = serde_json::to_vec(&(
+            "ermis.mls-device-registration.v1",
+            &self.user_id,
+            project_id,
+            device_id,
+            CIPHERSUITE as u16,
+            issued_at,
+        ))
+        .map_err(|_| JsError::new("Invalid device registration context"))?;
+        self.keypair
+            .sign(&payload)
+            .map_err(|_| JsError::new("Device registration proof failed"))
+    }
+
+    /// Read-only private-bundle ownership probe for selective pool reconciliation.
+    pub fn owns_key_package_ref(
+        &self,
+        provider: &Provider,
+        reference: Vec<u8>,
+    ) -> Result<bool, JsError> {
+        use openmls::prelude::{KeyPackageBundle, KeyPackageRef};
+        use openmls_traits::storage::StorageProvider;
+        if reference.len() != 32 {
+            return Err(JsError::new("Invalid KeyPackage reference length"));
+        }
+        let encoded = tls_codec::VLBytes::new(reference)
+            .tls_serialize_detached()
+            .map_err(|_| JsError::new("Invalid KeyPackage reference"))?;
+        let reference = KeyPackageRef::tls_deserialize_exact(&encoded)
+            .map_err(|_| JsError::new("Invalid KeyPackage reference"))?;
+        let bundle: Option<KeyPackageBundle> = provider
+            .0
+            .storage()
+            .key_package(&reference)
+            .map_err(|_| JsError::new("KeyPackage storage read failed"))?;
+        let Some(bundle) = bundle else {
+            return Ok(false);
+        };
+        // Verify the bundle reference before using its signing identity. A
+        // corrupt/foreign row is uncertain and must never authorize retirement.
+        let actual_reference = bundle
+            .key_package()
+            .hash_ref(provider.0.crypto())
+            .map_err(|_| JsError::new("KeyPackage reference mismatch"))?;
+        if actual_reference != reference {
+            return Err(JsError::new("KeyPackage reference mismatch"));
+        }
+        Ok(bundle.key_package().leaf_node().signature_key().as_slice() == self.keypair.public())
+    }
+
     /// Generate a single key package for this identity
-    pub fn key_package(&self, provider: &Provider) -> KeyPackage {
-        KeyPackage(
+    pub fn key_package(&self, provider: &Provider) -> Result<KeyPackage, JsError> {
+        Ok(KeyPackage(
             OpenMlsKeyPackage::builder()
                 .build(
                     CIPHERSUITE,
@@ -64,10 +143,10 @@ impl Identity {
                     &self.keypair,
                     self.credential_with_key.clone(),
                 )
-                .unwrap()
+                .map_err(|_| JsError::new("KeyPackage generation failed"))?
                 .key_package()
                 .clone(),
-        )
+        ))
     }
 
     /// Generate multiple key packages for multi-device support
@@ -75,8 +154,53 @@ impl Identity {
     /// # Arguments
     /// * `provider` - The crypto provider
     /// * `count` - Number of key packages to generate
-    pub fn key_packages(&self, provider: &Provider, count: u32) -> Vec<KeyPackage> {
+    pub fn key_packages(
+        &self,
+        provider: &Provider,
+        count: u32,
+    ) -> Result<Vec<KeyPackage>, JsError> {
         (0..count).map(|_| self.key_package(provider)).collect()
+    }
+
+    /// Typed fallible generation for durable SDK candidate operations.
+    pub fn key_package_typed(&self, provider: &Provider) -> Result<KeyPackage, MlsError> {
+        let bundle = OpenMlsKeyPackage::builder()
+            .build(
+                CIPHERSUITE,
+                &provider.0,
+                &self.keypair,
+                self.credential_with_key.clone(),
+            )
+            .map_err(|error| {
+                use openmls::prelude::KeyPackageNewError;
+                let code = match error {
+                    KeyPackageNewError::LifetimeCreation(
+                        openmls::key_packages::LifetimeCreationError::InvalidClock,
+                    ) => MlsErrorCode::InvalidClock,
+                    KeyPackageNewError::LifetimeCreation(_) => MlsErrorCode::LifetimeRangeInvalid,
+                    KeyPackageNewError::StorageError => MlsErrorCode::StorageError,
+                    _ => MlsErrorCode::CryptoError,
+                };
+                MlsError::new(code, "KeyPackage generation unavailable")
+            })?;
+        Ok(KeyPackage(bundle.key_package().clone()))
+    }
+
+    /// The SDK bounds the batch and persists candidate/private keys before upload.
+    pub fn key_packages_typed(
+        &self,
+        provider: &Provider,
+        count: u32,
+    ) -> Result<Vec<KeyPackage>, MlsError> {
+        if count == 0 || count > 100 {
+            return Err(MlsError::new(
+                MlsErrorCode::InvalidMessage,
+                "Invalid KeyPackage batch size",
+            ));
+        }
+        (0..count)
+            .map(|_| self.key_package_typed(provider))
+            .collect()
     }
 
     /// Serialize identity for storage
@@ -141,8 +265,10 @@ pub struct KeyPackage(pub(crate) OpenMlsKeyPackage);
 impl KeyPackage {
     /// Serialize this KeyPackage to bytes
     #[wasm_bindgen]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.0.tls_serialize_detached().unwrap()
+    pub fn to_bytes(&self) -> Result<Vec<u8>, JsError> {
+        self.0
+            .tls_serialize_detached()
+            .map_err(|_| JsError::new("KeyPackage serialization failed"))
     }
 
     /// Deserialize a KeyPackage from bytes

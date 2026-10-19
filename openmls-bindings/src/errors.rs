@@ -19,6 +19,16 @@ pub enum MlsError {
     ExternalCommitError,
     InternalError,
     NoMatchingKeyPackage,
+    // Append-only codes: preserve every existing variant ordinal.
+    LifetimeRangeInvalid,
+    LeafNotYetValid,
+    KeyPackageExpired,
+    InvalidClock,
+    StorageCorruption,
+    GroupInfoInvalid,
+    EpochConflict,
+    TransportUnknown,
+    AcceptanceMetadataInvalid,
 }
 
 impl fmt::Display for MlsError {
@@ -52,6 +62,20 @@ impl fmt::Display for MlsError {
                 write!(f, "MLS_EXTERNAL_COMMIT_ERROR: External commit failed")
             }
             MlsError::InternalError => write!(f, "MLS_INTERNAL_ERROR: Internal error"),
+            MlsError::LifetimeRangeInvalid => {
+                write!(f, "MLS_LIFETIMERANGEINVALID: LifetimeRangeInvalid")
+            }
+            MlsError::LeafNotYetValid => write!(f, "MLS_LEAFNOTYETVALID: LeafNotYetValid"),
+            MlsError::KeyPackageExpired => write!(f, "MLS_KEYPACKAGEEXPIRED: KeyPackageExpired"),
+            MlsError::InvalidClock => write!(f, "MLS_INVALIDCLOCK: InvalidClock"),
+            MlsError::StorageCorruption => write!(f, "MLS_STORAGECORRUPTION: StorageCorruption"),
+            MlsError::GroupInfoInvalid => write!(f, "MLS_GROUPINFOINVALID: GroupInfoInvalid"),
+            MlsError::EpochConflict => write!(f, "MLS_EPOCHCONFLICT: EpochConflict"),
+            MlsError::TransportUnknown => write!(f, "MLS_TRANSPORTUNKNOWN: TransportUnknown"),
+            MlsError::AcceptanceMetadataInvalid => write!(
+                f,
+                "MLS_ACCEPTANCE_METADATA_INVALID: Acceptance metadata rejected"
+            ),
             MlsError::NoMatchingKeyPackage => {
                 write!(f, "MLS_NO_MATCHING_KEY_PACKAGE: No matching key package")
             }
@@ -60,3 +84,46 @@ impl fmt::Display for MlsError {
 }
 
 impl std::error::Error for MlsError {}
+
+impl MlsError {
+    pub(crate) fn from_leaf_validation(
+        error: openmls::treesync::errors::LeafNodeValidationError,
+    ) -> Self {
+        use openmls::treesync::errors::{LeafNodeValidationError, LifetimeError};
+        match error {
+            LeafNodeValidationError::Lifetime(
+                LifetimeError::RangeTooBig | LifetimeError::InvalidRange,
+            ) => Self::LifetimeRangeInvalid,
+            LeafNodeValidationError::Lifetime(LifetimeError::NotYetValid) => Self::LeafNotYetValid,
+            LeafNodeValidationError::Lifetime(LifetimeError::NotCurrent) => Self::KeyPackageExpired,
+            LeafNodeValidationError::Lifetime(LifetimeError::InvalidClock) => Self::InvalidClock,
+            _ => Self::GroupInfoInvalid,
+        }
+    }
+
+    pub(crate) fn from_creation<StorageError>(
+        error: openmls::prelude::CreationFromExternalError<StorageError>,
+    ) -> Self {
+        use openmls::prelude::CreationFromExternalError;
+        match error {
+            CreationFromExternalError::LeafNodeValidation(error) => {
+                Self::from_leaf_validation(error)
+            }
+            CreationFromExternalError::WriteToStorageError(_) => Self::StorageError,
+            _ => Self::GroupInfoInvalid,
+        }
+    }
+
+    pub(crate) fn from_welcome<StorageError>(
+        error: openmls::group::WelcomeError<StorageError>,
+    ) -> Self {
+        use openmls::group::WelcomeError;
+        match error {
+            WelcomeError::NoMatchingKeyPackage => Self::NoMatchingKeyPackage,
+            WelcomeError::StorageError(_) => Self::StorageError,
+            WelcomeError::PublicGroupError(error) => Self::from_creation(error),
+            WelcomeError::LeafNodeValidation(error) => Self::from_leaf_validation(error),
+            _ => Self::GroupInfoInvalid,
+        }
+    }
+}

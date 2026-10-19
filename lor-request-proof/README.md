@@ -1,0 +1,1 @@
+Shared LOR request-proof codec. Canonical source: openmls/lor-request-proof. Bellboy vendors identical source for standalone/container builds. Keep both copies hash-identical and verify shared vectors. No JWT/session authority.

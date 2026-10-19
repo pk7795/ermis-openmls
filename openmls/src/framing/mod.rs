@@ -85,6 +85,8 @@ pub(crate) use sender::*;
 
 // Public
 pub mod errors;
+pub mod acceptance_context;
+pub use acceptance_context::{AcceptanceBinding, AcceptanceContext, AcceptanceContextError};
 
 pub use message_in::*;
 pub use message_out::*;

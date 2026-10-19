@@ -18,6 +18,9 @@ pub enum KeyPackageVerifyError {
     /// The lifetime of the leaf node is not valid.
     #[error("The lifetime of the leaf node is not valid.")]
     InvalidLifetime,
+    /// The signed lifetime range is zero, inverted, overflowing, or too long.
+    #[error("Invalid signed lifetime range.")]
+    InvalidLifetimeRange,
     /// The lifetime of the leaf node is missing.
     #[error("The lifetime of the leaf node is missing.")]
     MissingLifetime,
@@ -55,6 +58,9 @@ pub enum KeyPackageExtensionSupportError {
 /// KeyPackage new error
 #[derive(Error, Debug, PartialEq, Clone)]
 pub enum KeyPackageNewError {
+    /// Invalid clock or range during production lifetime generation.
+    #[error(transparent)]
+    LifetimeCreation(#[from] super::LifetimeCreationError),
     /// See [`LibraryError`] for more details.
     #[error(transparent)]
     LibraryError(#[from] LibraryError),

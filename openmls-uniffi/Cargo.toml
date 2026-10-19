@@ -15,6 +15,10 @@ name = "uniffi-bindgen"
 path = "uniffi-bindgen.rs"
 
 [dependencies]
+serde_json = "1.0"
+rusqlite = { version = "0.32", features = ["bundled"] }
+openmls-recovery = { path = "../openmls-recovery" }
+openmls_rust_crypto = { path = "../openmls_rust_crypto" }
 uniffi = { version = "0.28", features = ["cli"] }
 openmls-bindings-core = { path = "../openmls-bindings" }
 log = "0.4"

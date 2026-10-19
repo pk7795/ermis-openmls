@@ -24,7 +24,7 @@ fn create_group_pair(cid: &str) -> Result<TestPair, Box<dyn Error>> {
     let add_result = alice_group.add_members(
         alice_provider.clone(),
         alice.clone(),
-        vec![bob.key_package(bob_provider.clone())],
+        vec![bob.key_package(bob_provider.clone())?],
     )?;
     alice_group.merge_pending_commit(alice_provider.clone())?;
 

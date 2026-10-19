@@ -79,6 +79,23 @@ impl Group {
             .map_err(MlsError::from_core)
     }
 
+    pub fn join_with_welcome_with_policy(
+        provider: Arc<Provider>,
+        welcome: Vec<u8>,
+        ratchet_tree: Option<Arc<RatchetTree>>,
+        allow_expired_tree_leaves: bool,
+    ) -> Result<Self, MlsError> {
+        Ok(Self::from_core(
+            openmls_bindings_core::Group::join_with_welcome_with_policy(
+                provider.core(),
+                welcome,
+                ratchet_tree.map(|tree| tree.inner.clone()),
+                allow_expired_tree_leaves,
+            )
+            .map_err(MlsError::from_core)?,
+        ))
+    }
+
     pub fn join_with_welcome(
         provider: Arc<Provider>,
         welcome: Vec<u8>,
@@ -231,6 +248,33 @@ impl Group {
         Ok(self
             .inner
             .process_message_at(provider.core(), msg, server_accepted_at_seconds)
+            .map_err(MlsError::from_core)?
+            .into())
+    }
+
+    pub fn process_message_with_context(
+        &self,
+        provider: Arc<Provider>,
+        msg: Vec<u8>,
+        context_json: String,
+        event_id: String,
+        cid: String,
+        group_generation: u64,
+        event_epoch: u64,
+        defer_secret_persistence: bool,
+    ) -> Result<ProcessedMessage, MlsError> {
+        Ok(self
+            .inner
+            .process_message_with_context(
+                provider.core(),
+                msg,
+                context_json,
+                event_id,
+                cid,
+                group_generation,
+                event_epoch,
+                defer_secret_persistence,
+            )
             .map_err(MlsError::from_core)?
             .into())
     }
@@ -543,6 +587,27 @@ pub fn join_external(
         identity.core(),
         group_info,
         ratchet_tree.map(|value| value.inner.clone()),
+    )
+    .map_err(MlsError::from_core)?;
+    Ok(ExternalJoinResult {
+        group: Arc::new(Group::from_core(result.group())),
+        commit: result.commit_bytes(),
+    })
+}
+
+pub fn join_external_with_policy(
+    provider: Arc<Provider>,
+    identity: Arc<Identity>,
+    group_info: Vec<u8>,
+    ratchet_tree: Option<Arc<RatchetTree>>,
+    allow_expired_tree_leaves: bool,
+) -> Result<ExternalJoinResult, MlsError> {
+    let result = openmls_bindings_core::join_external_with_policy(
+        provider.core(),
+        identity.core(),
+        group_info,
+        ratchet_tree.map(|value| value.inner.clone()),
+        allow_expired_tree_leaves,
     )
     .map_err(MlsError::from_core)?;
     Ok(ExternalJoinResult {

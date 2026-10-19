@@ -21,6 +21,16 @@ pub enum MlsError {
     ExternalCommitError,
     InternalError,
     NoMatchingKeyPackage,
+    // Append-only codes: preserve every existing variant ordinal.
+    LifetimeRangeInvalid,
+    LeafNotYetValid,
+    KeyPackageExpired,
+    InvalidClock,
+    StorageCorruption,
+    GroupInfoInvalid,
+    EpochConflict,
+    TransportUnknown,
+    AcceptanceMetadataInvalid,
 }
 
 impl fmt::Display for MlsError {
@@ -43,6 +53,20 @@ impl fmt::Display for MlsError {
             MlsError::InvalidState => write!(f, "Invalid state"),
             MlsError::ExternalCommitError => write!(f, "External commit failed"),
             MlsError::InternalError => write!(f, "Internal error"),
+            MlsError::LifetimeRangeInvalid => {
+                write!(f, "MLS_LIFETIMERANGEINVALID: LifetimeRangeInvalid")
+            }
+            MlsError::LeafNotYetValid => write!(f, "MLS_LEAFNOTYETVALID: LeafNotYetValid"),
+            MlsError::KeyPackageExpired => write!(f, "MLS_KEYPACKAGEEXPIRED: KeyPackageExpired"),
+            MlsError::InvalidClock => write!(f, "MLS_INVALIDCLOCK: InvalidClock"),
+            MlsError::StorageCorruption => write!(f, "MLS_STORAGECORRUPTION: StorageCorruption"),
+            MlsError::GroupInfoInvalid => write!(f, "MLS_GROUPINFOINVALID: GroupInfoInvalid"),
+            MlsError::EpochConflict => write!(f, "MLS_EPOCHCONFLICT: EpochConflict"),
+            MlsError::TransportUnknown => write!(f, "MLS_TRANSPORTUNKNOWN: TransportUnknown"),
+            MlsError::AcceptanceMetadataInvalid => write!(
+                f,
+                "MLS_ACCEPTANCE_METADATA_INVALID: Acceptance metadata rejected"
+            ),
             MlsError::NoMatchingKeyPackage => write!(f, "No matching key package"),
         }
     }
@@ -66,6 +90,17 @@ impl MlsError {
             openmls_bindings_core::MlsError::InvalidState => Self::InvalidState,
             openmls_bindings_core::MlsError::ExternalCommitError => Self::ExternalCommitError,
             openmls_bindings_core::MlsError::InternalError => Self::InternalError,
+            openmls_bindings_core::MlsError::LifetimeRangeInvalid => Self::LifetimeRangeInvalid,
+            openmls_bindings_core::MlsError::LeafNotYetValid => Self::LeafNotYetValid,
+            openmls_bindings_core::MlsError::KeyPackageExpired => Self::KeyPackageExpired,
+            openmls_bindings_core::MlsError::InvalidClock => Self::InvalidClock,
+            openmls_bindings_core::MlsError::StorageCorruption => Self::StorageCorruption,
+            openmls_bindings_core::MlsError::GroupInfoInvalid => Self::GroupInfoInvalid,
+            openmls_bindings_core::MlsError::EpochConflict => Self::EpochConflict,
+            openmls_bindings_core::MlsError::TransportUnknown => Self::TransportUnknown,
+            openmls_bindings_core::MlsError::AcceptanceMetadataInvalid => {
+                Self::AcceptanceMetadataInvalid
+            }
             openmls_bindings_core::MlsError::NoMatchingKeyPackage => Self::NoMatchingKeyPackage,
         }
     }

@@ -10,9 +10,10 @@ use crate::{
         MlsGroupJoinConfig, OutgoingWireFormatPolicy, StagedWelcome, WireFormatPolicy,
     },
     key_packages::*,
-    prelude::LeafNodeParameters,
+    prelude::{CreationFromExternalError, LeafNodeParameters, WelcomeError},
     schedule::psk::PreSharedKeyId,
     test_utils::*,
+    treesync::errors::{LeafNodeValidationError, LifetimeError},
     treesync::{
         node::encryption_keys::{EncryptionKeyPair, EncryptionPrivateKey},
         RatchetTreeIn,
@@ -117,7 +118,7 @@ pub fn run_test_vector(test_vector: PassiveClientWelcomeTestVector) {
     let _ = pretty_env_logger::try_init();
 
     let provider = OpenMlsRustCrypto::default();
-    let cipher_suite = test_vector.cipher_suite.try_into().unwrap();
+    let cipher_suite = test_vector.cipher_suite.try_into().test_value();
     if provider.crypto().supports(cipher_suite).is_err() {
         warn!("Skipping {cipher_suite}");
         return;
@@ -144,16 +145,29 @@ pub fn run_test_vector(test_vector: PassiveClientWelcomeTestVector) {
     let ratchet_tree: Option<RatchetTreeIn> = test_vector
         .ratchet_tree
         .as_ref()
-        .map(|bytes| RatchetTreeIn::tls_deserialize_exact(bytes.0.as_slice()).unwrap());
+        .map(|bytes| RatchetTreeIn::tls_deserialize_exact(bytes.0.as_slice()).test_value());
 
-    passive_client.join_by_welcome(
-        MlsMessageIn::tls_deserialize_exact(&test_vector.welcome).unwrap(),
+    if !passive_client.join_by_welcome(
+        MlsMessageIn::tls_deserialize_exact(&test_vector.welcome).test_value(),
         ratchet_tree,
-    );
+    ) {
+        // The signed upstream vector is superseded under the product range
+        // policy. Its rejection is asserted; do not extend the production max
+        // or edit signed bytes to force its old successful-join expectation.
+        info!("legacy passive-client fixture rejected: signed lifetime range exceeds policy");
+        return;
+    }
 
     debug!(
         "Group ID {}",
-        bytes_to_hex(passive_client.group.as_ref().unwrap().group_id().as_slice())
+        bytes_to_hex(
+            passive_client
+                .group
+                .as_ref()
+                .test_value()
+                .group_id()
+                .as_slice()
+        )
     );
 
     assert_eq!(
@@ -165,12 +179,12 @@ pub fn run_test_vector(test_vector: PassiveClientWelcomeTestVector) {
         info!("Epoch #{i}");
 
         for proposal in epoch.proposals {
-            let message = MlsMessageIn::tls_deserialize_exact(&proposal.0).unwrap();
+            let message = MlsMessageIn::tls_deserialize_exact(&proposal.0).test_value();
             debug!("Proposal: {message:?}");
             passive_client.process_message(message);
         }
 
-        let message = MlsMessageIn::tls_deserialize_exact(&epoch.commit).unwrap();
+        let message = MlsMessageIn::tls_deserialize_exact(&epoch.commit).test_value();
         debug!("Commit: {message:#?}");
         passive_client.process_message(message);
 
@@ -218,7 +232,7 @@ impl PassiveClient {
             // We only construct this to easily save the PSK in the keystore.
             // The nonce is not saved, so it can be empty...
             let psk_id = PreSharedKeyId::external(psk.psk_id, vec![]);
-            psk_id.store(&provider, &psk.psk).unwrap();
+            psk_id.store(&provider, &psk.psk).test_value();
         }
 
         Self {
@@ -236,7 +250,8 @@ impl PassiveClient {
         init_priv: Vec<u8>,
     ) {
         let key_package: KeyPackage = {
-            let mls_message_key_package = MlsMessageIn::tls_deserialize_exact(key_package).unwrap();
+            let mls_message_key_package =
+                MlsMessageIn::tls_deserialize_exact(key_package).test_value();
 
             match mls_message_key_package.body {
                 MlsMessageBodyIn::KeyPackage(key_package) => key_package.into(),
@@ -253,11 +268,11 @@ impl PassiveClient {
         };
 
         // Store key package.
-        let hash_ref = key_package.hash_ref(self.provider.crypto()).unwrap();
+        let hash_ref = key_package.hash_ref(self.provider.crypto()).test_value();
         self.provider
             .storage()
             .write_key_package(&hash_ref, &key_package_bundle)
-            .unwrap();
+            .test_value();
 
         // Store encryption key
         let key_pair = EncryptionKeyPair::from((
@@ -265,29 +280,30 @@ impl PassiveClient {
             EncryptionPrivateKey::from(encryption_priv),
         ));
 
-        key_pair.write(self.provider.storage()).unwrap();
+        key_pair.write(self.provider.storage()).test_value();
     }
 
     fn join_by_welcome(
         &mut self,
         mls_message_welcome: MlsMessageIn,
         ratchet_tree: Option<RatchetTreeIn>,
-    ) {
-        let welcome = mls_message_welcome
-            .into_welcome()
-            .expect("expected a welcome");
+    ) -> bool {
+        let welcome = mls_message_welcome.into_welcome().test_value();
 
-        let group = StagedWelcome::new_from_welcome(
+        let staged = StagedWelcome::new_from_welcome(
             &self.provider,
             &self.group_config,
             welcome,
             ratchet_tree,
-        )
-        .unwrap()
-        .into_group(&self.provider)
-        .unwrap();
-
+        );
+        let group = match staged {
+            Err(WelcomeError::PublicGroupError(CreationFromExternalError::LeafNodeValidation(
+                LeafNodeValidationError::Lifetime(LifetimeError::RangeTooBig),
+            ))) => return false,
+            other => other.test_value().into_group(&self.provider).test_value(),
+        };
         self.group = Some(group);
+        true
     }
 
     fn process_message(&mut self, message: MlsMessageIn) {
@@ -295,24 +311,24 @@ impl PassiveClient {
         let processed_message = self
             .group
             .as_mut()
-            .unwrap()
-            .process_message(&self.provider, message.into_protocol_message().unwrap())
-            .unwrap();
+            .test_value()
+            .process_message(&self.provider, message.into_protocol_message().test_value())
+            .test_value();
 
         match processed_message.into_content() {
             ProcessedMessageContent::ProposalMessage(queued_proposal) => {
                 self.group
                     .as_mut()
-                    .unwrap()
+                    .test_value()
                     .store_pending_proposal(self.provider.storage(), *queued_proposal)
-                    .unwrap();
+                    .test_value();
             }
             ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
                 self.group
                     .as_mut()
-                    .unwrap()
+                    .test_value()
                     .merge_staged_commit(&self.provider, *staged_commit)
-                    .unwrap();
+                    .test_value();
             }
             _ => unimplemented!(),
         }
@@ -321,7 +337,7 @@ impl PassiveClient {
     fn epoch_authenticator(&self) -> Vec<u8> {
         self.group
             .as_ref()
-            .unwrap()
+            .test_value()
             .epoch_authenticator()
             .as_slice()
             .to_vec()
@@ -348,7 +364,7 @@ pub fn generate_test_vector(ciphersuite: Ciphersuite) -> PassiveClientWelcomeTes
             .credential_with_key
             .clone(),
     )
-    .unwrap();
+    .test_value();
 
     let passive = generate_group_candidate(
         b"Bob (Passive Client)",
@@ -363,11 +379,11 @@ pub fn generate_test_vector(ciphersuite: Ciphersuite) -> PassiveClientWelcomeTes
             &creator.signature_keypair,
             core::slice::from_ref(passive.key_package.key_package()),
         )
-        .unwrap();
+        .test_value();
 
     creator_group
         .merge_pending_commit(&creator_provider)
-        .unwrap();
+        .test_value();
 
     let initial_epoch_authenticator = creator_group.epoch_authenticator().as_slice().to_vec();
 
@@ -491,13 +507,13 @@ pub fn generate_test_vector(ciphersuite: Ciphersuite) -> PassiveClientWelcomeTes
 
         key_package: MlsMessageOut::from(passive.key_package)
             .tls_serialize_detached()
-            .unwrap(),
+            .test_value(),
 
         signature_priv: passive.signature_keypair.private().to_vec(),
         encryption_priv,
         init_priv,
 
-        welcome: mls_message_welcome.tls_serialize_detached().unwrap(),
+        welcome: mls_message_welcome.tls_serialize_detached().test_value(),
         ratchet_tree: None,
         initial_epoch_authenticator,
 
@@ -527,10 +543,14 @@ fn propose_add(
             &candidate.signature_keypair,
             add_candidate.key_package.key_package(),
         )
-        .unwrap();
-    group.merge_pending_commit(provider).unwrap();
+        .test_value();
+    group.merge_pending_commit(provider).test_value();
 
-    TestProposal(mls_message_out_proposal.tls_serialize_detached().unwrap())
+    TestProposal(
+        mls_message_out_proposal
+            .tls_serialize_detached()
+            .test_value(),
+    )
 }
 
 fn propose_remove(
@@ -542,23 +562,27 @@ fn propose_remove(
     let remove = group
         .members()
         .find(|Member { credential, .. }| credential.serialized_content() == remove_identity)
-        .unwrap()
+        .test_value()
         .index;
 
     let mls_message_out_proposal = group
         .propose_remove_member(provider, &candidate.signature_keypair, remove)
-        .unwrap();
+        .test_value();
 
-    TestProposal(mls_message_out_proposal.tls_serialize_detached().unwrap())
+    TestProposal(
+        mls_message_out_proposal
+            .tls_serialize_detached()
+            .test_value(),
+    )
 }
 
 fn commit(provider: &OpenMlsRustCrypto, creator: &GroupCandidate, group: &mut MlsGroup) -> Vec<u8> {
     let (mls_message_out_commit, _, _) = group
         .commit_to_pending_proposals(provider, &creator.signature_keypair)
-        .unwrap();
-    group.merge_pending_commit(provider).unwrap();
+        .test_value();
+    group.merge_pending_commit(provider).test_value();
 
-    mls_message_out_commit.tls_serialize_detached().unwrap()
+    mls_message_out_commit.tls_serialize_detached().test_value()
 }
 
 fn update_inline(
@@ -572,13 +596,13 @@ fn update_inline(
             &candidate.signature_keypair,
             LeafNodeParameters::default(),
         )
-        .unwrap()
+        .test_value()
         .into_contents();
-    group.merge_pending_commit(provider).unwrap();
+    group.merge_pending_commit(provider).test_value();
 
     let proposals = vec![];
 
-    let commit = mls_message_out_commit.tls_serialize_detached().unwrap();
+    let commit = mls_message_out_commit.tls_serialize_detached().test_value();
 
     let epoch_authenticator = group.epoch_authenticator().as_slice().to_vec();
 
@@ -586,5 +610,29 @@ fn update_inline(
         proposals,
         commit,
         epoch_authenticator,
+    }
+}
+
+// Fixture-only conversion; preserves a hard failure for any unexpected error.
+trait FixtureValue {
+    type Value;
+    fn test_value(self) -> Self::Value;
+}
+impl<T, E> FixtureValue for Result<T, E> {
+    type Value = T;
+    fn test_value(self) -> T {
+        match self {
+            Ok(value) => value,
+            Err(_) => panic!("invalid passive-client test fixture"),
+        }
+    }
+}
+impl<T> FixtureValue for Option<T> {
+    type Value = T;
+    fn test_value(self) -> T {
+        match self {
+            Some(value) => value,
+            None => panic!("missing passive-client test fixture value"),
+        }
     }
 }

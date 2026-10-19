@@ -32,6 +32,16 @@ pub enum MlsErrorCode {
     ExternalCommitError,
     /// A Welcome does not contain a KeyPackage owned by this provider
     NoMatchingKeyPackage,
+    // Append-only codes: preserve every existing variant ordinal.
+    LifetimeRangeInvalid,
+    LeafNotYetValid,
+    KeyPackageExpired,
+    InvalidClock,
+    StorageCorruption,
+    GroupInfoInvalid,
+    EpochConflict,
+    TransportUnknown,
+    AcceptanceMetadataInvalid,
 }
 
 /// Custom error type for MLS operations
@@ -81,6 +91,15 @@ impl MlsError {
             MlsErrorCode::CryptoError => "CryptoError",
             MlsErrorCode::InvalidState => "InvalidState",
             MlsErrorCode::ExternalCommitError => "ExternalCommitError",
+            MlsErrorCode::LifetimeRangeInvalid => "LifetimeRangeInvalid",
+            MlsErrorCode::LeafNotYetValid => "LeafNotYetValid",
+            MlsErrorCode::KeyPackageExpired => "KeyPackageExpired",
+            MlsErrorCode::InvalidClock => "InvalidClock",
+            MlsErrorCode::StorageCorruption => "StorageCorruption",
+            MlsErrorCode::GroupInfoInvalid => "GroupInfoInvalid",
+            MlsErrorCode::EpochConflict => "EpochConflict",
+            MlsErrorCode::TransportUnknown => "TransportUnknown",
+            MlsErrorCode::AcceptanceMetadataInvalid => "AcceptanceMetadataInvalid",
             MlsErrorCode::NoMatchingKeyPackage => "NoMatchingKeyPackage",
         }
         .to_string()
@@ -95,15 +114,46 @@ impl std::fmt::Display for MlsError {
 
 // Helper to convert internal errors
 impl MlsError {
+    pub(crate) fn from_leaf_validation(
+        error: openmls::treesync::errors::LeafNodeValidationError,
+    ) -> MlsErrorCode {
+        use openmls::treesync::errors::{LeafNodeValidationError, LifetimeError};
+        match error {
+            LeafNodeValidationError::Lifetime(
+                LifetimeError::RangeTooBig | LifetimeError::InvalidRange,
+            ) => MlsErrorCode::LifetimeRangeInvalid,
+            LeafNodeValidationError::Lifetime(LifetimeError::NotYetValid) => {
+                MlsErrorCode::LeafNotYetValid
+            }
+            LeafNodeValidationError::Lifetime(LifetimeError::NotCurrent) => {
+                MlsErrorCode::KeyPackageExpired
+            }
+            LeafNodeValidationError::Lifetime(LifetimeError::InvalidClock) => {
+                MlsErrorCode::InvalidClock
+            }
+            _ => MlsErrorCode::GroupInfoInvalid,
+        }
+    }
+
     pub(crate) fn from_welcome_error<StorageError: std::fmt::Display>(
         error: WelcomeError<StorageError>,
     ) -> Self {
         let code = match &error {
             WelcomeError::NoMatchingKeyPackage => MlsErrorCode::NoMatchingKeyPackage,
             WelcomeError::StorageError(_) => MlsErrorCode::StorageError,
+            WelcomeError::LeafNodeValidation(error) => Self::from_leaf_validation(error.clone()),
+            WelcomeError::PublicGroupError(error) => match error {
+                openmls::prelude::CreationFromExternalError::LeafNodeValidation(error) => {
+                    Self::from_leaf_validation(error.clone())
+                }
+                openmls::prelude::CreationFromExternalError::WriteToStorageError(_) => {
+                    MlsErrorCode::StorageError
+                }
+                _ => MlsErrorCode::GroupInfoInvalid,
+            },
             _ => MlsErrorCode::InvalidMessage,
         };
-        Self::new(code, &error.to_string())
+        Self::new(code, "Welcome validation failed")
     }
 
     pub fn serialization(msg: &str) -> JsError {

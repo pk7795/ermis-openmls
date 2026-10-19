@@ -102,6 +102,12 @@ build_android() {
 
     # Setup cargo config for Android cross-compilation
     local TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64"
+    local READELF="$TOOLCHAIN/bin/llvm-readelf"
+
+    if [ ! -x "$READELF" ]; then
+        error "Android NDK llvm-readelf was not found at $READELF"
+        exit 1
+    fi
     
     export CC_aarch64_linux_android="$TOOLCHAIN/bin/aarch64-linux-android21-clang"
     export CXX_aarch64_linux_android="$TOOLCHAIN/bin/aarch64-linux-android21-clang++"
@@ -137,16 +143,22 @@ build_android() {
     # Verify 16KB page alignment (required by Android 15+)
     log "Verifying 16KB page alignment..."
     local alignment_ok=true
-    for so_file in $(find "$OUT_DIR/android/jniLibs" -name "*.so"); do
-        local p_align
-        p_align=$(llvm-readelf -l "$so_file" 2>/dev/null | grep LOAD | awk '{print $NF}' | head -1)
-        if [ "$p_align" = "0x4000" ]; then
-            log "  ✓ $(basename "$so_file") [$(basename "$(dirname "$so_file")")] p_align=$p_align"
+    while IFS= read -r so_file; do
+        local p_alignments
+        local alignment_file_ok=true
+        p_alignments=$("$READELF" -lW "$so_file" | awk '$1 == "LOAD" { print $NF }' | sort -u)
+        for p_align in $p_alignments; do
+            if (( p_align < 0x4000 )); then
+                alignment_file_ok=false
+            fi
+        done
+        if [ -n "$p_alignments" ] && [ "$alignment_file_ok" = true ]; then
+            log "  ✓ $(basename "$so_file") [$(basename "$(dirname "$so_file")")] p_align=$p_alignments"
         else
-            error "  ✗ $(basename "$so_file") [$(basename "$(dirname "$so_file")")] p_align=$p_align (expected 0x4000)"
+            error "  ✗ $(basename "$so_file") [$(basename "$(dirname "$so_file")")] p_align=$p_alignments (expected every LOAD segment >= 0x4000)"
             alignment_ok=false
         fi
-    done
+    done < <(find "$OUT_DIR/android/jniLibs" -name "*.so" -type f | sort)
 
     if [ "$alignment_ok" = false ]; then
         error "16KB page alignment check FAILED. Check .cargo/config.toml for missing rustflags."
@@ -180,6 +192,10 @@ patch_kotlin_bindings() {
         if [ -f "$fix_script" ]; then
             perl "$fix_script" "$kt_file"
         fi
+
+        # Normalize generator whitespace so committed consumer bindings pass
+        # repository whitespace checks and produce stable source checksums.
+        perl -i -pe 's/[ \t]+$//' "$kt_file"
 
         log "  ✓ Patched: $(basename "$kt_file")"
     done

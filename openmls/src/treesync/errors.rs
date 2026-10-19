@@ -237,6 +237,15 @@ pub enum LifetimeError {
     /// Lifetime range is too wide.
     #[error("Lifetime range is too wide.")]
     RangeTooBig,
+    /// Lifetime is zero or inverted.
+    #[error("Invalid lifetime range.")]
+    InvalidRange,
+    /// Leaf is not valid yet.
+    #[error("Lifetime not-before has not passed.")]
+    NotYetValid,
+    /// Current clock is unavailable.
+    #[error("Invalid lifetime clock.")]
+    InvalidClock,
     /// Lifetime doesn't cover current time.
     #[error("Lifetime doesn't cover current time.")]
     NotCurrent,

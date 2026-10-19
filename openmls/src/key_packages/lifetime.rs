@@ -1,5 +1,3 @@
-#[cfg(target_arch = "wasm32")]
-use fluvio_wasm_timer::{SystemTime, UNIX_EPOCH};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,16 +24,38 @@ impl Drop for TestUnixTimeGuard {
     }
 }
 
-fn unix_time_seconds() -> Option<u64> {
+pub(crate) fn unix_time_seconds() -> Option<u64> {
     #[cfg(test)]
     if let Some(unix_time_seconds) = TEST_UNIX_TIME_SECONDS.with(Cell::get) {
         return Some(unix_time_seconds);
     }
 
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .ok()
+    #[cfg(target_arch = "wasm32")]
+    {
+        checked_js_unix_seconds(js_sys::Date::now())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .ok()
+            .filter(|seconds| *seconds > 0)
+    }
+}
+
+// Check the original JS sample before a timer/cast can saturate NaN or
+// negative values to zero. Keep one clock sample per lifetime operation.
+#[cfg(any(target_arch = "wasm32", test))]
+fn checked_js_unix_seconds(milliseconds: f64) -> Option<u64> {
+    if !milliseconds.is_finite() || milliseconds <= 0.0 {
+        return None;
+    }
+    let seconds = (milliseconds / 1000.0).floor();
+    if seconds < 1.0 || seconds >= 18_446_744_073_709_551_616.0 {
+        return None;
+    }
+    Some(seconds as u64)
 }
 
 /// This value is used as the default lifetime if no default  lifetime is configured.
@@ -49,7 +69,7 @@ const DEFAULT_KEY_PACKAGE_LIFETIME_MARGIN_SECONDS: u64 = 60 * 60;
 
 /// The maximum total lifetime range that is acceptable for a leaf node.
 /// The value is in seconds and amounts to 3 * 28 Days, i.e., about 3 months.
-const MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS: u64 =
+pub const MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS: u64 =
     DEFAULT_KEY_PACKAGE_LIFETIME_MARGIN_SECONDS + DEFAULT_KEY_PACKAGE_LIFETIME_SECONDS;
 
 /// The lifetime represents the times between which clients will
@@ -87,7 +107,56 @@ pub struct Lifetime {
     not_after: u64,
 }
 
+/// Failures creating a signed lifetime. No fallback clock is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum LifetimeCreationError {
+    /// Clock unavailable or at/before the Unix epoch.
+    #[error("invalid lifetime clock")]
+    InvalidClock,
+    /// Zero, inverted, overflowing, or excessive duration.
+    #[error("invalid lifetime range")]
+    InvalidRange,
+}
+
 impl Lifetime {
+    /// Create a signed lifetime using one fallible current-clock sample.
+    pub fn try_new(t: u64) -> Result<Self, LifetimeCreationError> {
+        let now = unix_time_seconds().ok_or(LifetimeCreationError::InvalidClock)?;
+        Self::try_new_at(t, now)
+    }
+
+    /// Create a lifetime at an explicit Unix timestamp, with the existing 1h margin.
+    pub fn try_new_at(t: u64, now: u64) -> Result<Self, LifetimeCreationError> {
+        if now == 0 {
+            return Err(LifetimeCreationError::InvalidClock);
+        }
+        if t == 0 {
+            return Err(LifetimeCreationError::InvalidRange);
+        }
+        let not_before = now.saturating_sub(DEFAULT_KEY_PACKAGE_LIFETIME_MARGIN_SECONDS);
+        let not_after = now
+            .checked_add(t)
+            .ok_or(LifetimeCreationError::InvalidRange)?;
+        let lifetime = Self {
+            not_before,
+            not_after,
+        };
+        if !lifetime.has_acceptable_range() {
+            return Err(LifetimeCreationError::InvalidRange);
+        }
+        Ok(lifetime)
+    }
+
+    /// Fallible default for production KeyPackage builders.
+    pub fn try_default() -> Result<Self, LifetimeCreationError> {
+        Self::try_new(DEFAULT_KEY_PACKAGE_LIFETIME_SECONDS)
+    }
+
+    pub(crate) fn current_time() -> Option<u64> {
+        unix_time_seconds()
+    }
+
+    /// Legacy infallible constructor. Production generation uses `try_new`.
     /// Create a new lifetime with lifetime `t` (in seconds).
     /// Note that the lifetime is extended 1h into the past to adapt to skewed
     /// clocks, i.e. `not_before` is set to now - 1h.
@@ -109,7 +178,7 @@ impl Lifetime {
     }
 
     /// Initialize raw lifetime without skew and explicit dates.
-    pub fn init(not_before: u64, not_after: u64) -> Self {
+    pub const fn init(not_before: u64, not_after: u64) -> Self {
         Self {
             not_before,
             not_after,
@@ -153,7 +222,8 @@ impl Lifetime {
     /// Applications MUST define a maximum total lifetime that is acceptable for a LeafNode,
     /// and reject any LeafNode where the total lifetime is longer than this duration.
     pub fn has_acceptable_range(&self) -> bool {
-        self.not_after.saturating_sub(self.not_before) <= MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS
+        matches!(self.not_after.checked_sub(self.not_before),
+            Some(range) if range > 0 && range <= MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS)
     }
 
     /// Returns the "not before" timestamp of the KeyPackage.
@@ -207,5 +277,90 @@ mod tests {
         assert!(lifetime.is_valid_at(199));
         assert!(!lifetime.is_valid_at(200));
         assert!(!lifetime.is_valid_at(201));
+    }
+}
+
+#[cfg(test)]
+mod strict_range_tests {
+    use super::*;
+
+    #[test]
+    fn js_clock_checks_original_sample_before_integer_conversion() {
+        for sample in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -1000.0,
+            0.0,
+            999.9,
+            f64::MAX,
+            18_446_744_073_709_551_616.0 * 1000.0,
+        ] {
+            assert_eq!(checked_js_unix_seconds(sample), None);
+        }
+        assert_eq!(checked_js_unix_seconds(1000.0), Some(1));
+        assert_eq!(checked_js_unix_seconds(1999.9), Some(1));
+        assert_eq!(
+            checked_js_unix_seconds(1_791_504_123_456.0),
+            Some(1_791_504_123)
+        );
+    }
+
+    #[test]
+    fn malformed_and_maximum_ranges_are_checked_without_saturation() {
+        for lifetime in [
+            Lifetime::init(0, 0),
+            Lifetime::init(200, 100),
+            Lifetime::init(0, u64::MAX),
+            Lifetime::init(1, 7_261_202),
+        ] {
+            assert!(!lifetime.has_acceptable_range());
+        }
+        assert!(Lifetime::init(1, 7_261_201).has_acceptable_range());
+        assert!(Lifetime::init(u64::MAX - 1, u64::MAX).has_acceptable_range());
+    }
+
+    #[test]
+    fn production_generation_rejects_zero_overflow_clock_and_excess_range(
+    ) -> Result<(), LifetimeCreationError> {
+        assert_eq!(
+            Lifetime::try_new_at(0, 10_000),
+            Err(LifetimeCreationError::InvalidRange)
+        );
+        assert_eq!(
+            Lifetime::try_new_at(1, 0),
+            Err(LifetimeCreationError::InvalidClock)
+        );
+        assert_eq!(
+            Lifetime::try_new_at(1, u64::MAX),
+            Err(LifetimeCreationError::InvalidRange)
+        );
+        assert_eq!(
+            Lifetime::try_new_at(7_257_601, 10_000),
+            Err(LifetimeCreationError::InvalidRange)
+        );
+        assert_eq!(
+            Lifetime::try_new_at(86 * 86400, 10_000),
+            Err(LifetimeCreationError::InvalidRange)
+        );
+        let lifetime = Lifetime::try_new_at(7_257_600, 10_000)?;
+        assert_eq!(lifetime.not_after() - lifetime.not_before(), 7_261_200);
+        Ok(())
+    }
+
+    #[test]
+    fn randomized_malformed_lifetimes_match_the_unsigned_range_invariant() {
+        let mut seed = 0x1234_5678_9abc_def0_u64;
+        for _ in 0..10_000 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let before = seed;
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let after = seed;
+            let expected = after > before && after - before <= 7_261_200;
+            assert_eq!(
+                Lifetime::init(before, after).has_acceptable_range(),
+                expected
+            );
+        }
     }
 }

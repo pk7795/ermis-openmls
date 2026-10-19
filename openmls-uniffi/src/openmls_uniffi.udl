@@ -3,9 +3,26 @@ namespace openmls_uniffi {
 
     [Throws=MlsError]
     ExternalJoinResult join_external(Provider provider, Identity identity, bytes group_info, RatchetTree? ratchet_tree);
+    [Throws=MlsError]
+    ExternalJoinResult join_external_with_policy(Provider provider, Identity identity, bytes group_info, RatchetTree? ratchet_tree, boolean allow_expired_tree_leaves);
 
     [Throws=MlsError]
     ArchivedMessage decrypt_epoch_archive_v2(Provider provider, bytes archive, bytes snapshot, bytes ciphertext, boolean allow_own_messages, u32 max_forward_distance);
+
+    [Throws=MlsError]
+    RecoveryKeys generate_recovery_keys();
+    [Throws=MlsError]
+    bytes create_recovery_vault(string pin, RecoveryKeys keys);
+    [Throws=MlsError]
+    RecoveryVaultMetadata recovery_vault_metadata(bytes vault);
+    [Throws=MlsError]
+    bytes unlock_recovery_vault(string pin, bytes vault);
+    [Throws=MlsError]
+    RecoveryArchiveBlob seal_recovery_archive(bytes archive, string cid, u64 group_generation, u64 epoch, string scope, string blob_id, string snapshot_hash);
+    [Throws=MlsError]
+    RecoveryArchiveWrap wrap_recovery_archive_key(bytes adk, bytes public_key, string cid, u64 group_generation, u64 epoch, string scope, string blob_id, string snapshot_hash, string key_id);
+    [Throws=MlsError]
+    bytes open_recovery_archive(bytes private_key, RecoveryArchiveBlob blob, RecoveryArchiveWrap wrap);
 
     boolean validate_key_package_bytes(bytes data);
 };
@@ -28,6 +45,15 @@ enum MlsError {
     "ExternalCommitError",
     "InternalError",
     "NoMatchingKeyPackage",
+    "LifetimeRangeInvalid",
+    "LeafNotYetValid",
+    "KeyPackageExpired",
+    "InvalidClock",
+    "StorageCorruption",
+    "GroupInfoInvalid",
+    "EpochConflict",
+    "TransportUnknown",
+    "AcceptanceMetadataInvalid",
 };
 
 enum MessageType {
@@ -110,6 +136,9 @@ interface Provider {
 
     [Throws=MlsError]
     void delete_identity();
+
+    [Throws=MlsError]
+    string key_package_upload_provider_id();
 };
 
 interface Identity {
@@ -117,7 +146,16 @@ interface Identity {
     constructor(Provider provider, string user_id);
 
     string user_id();
+    bytes signature_public_key();
+    [Throws=MlsError]
+    bytes device_registration_signature(string device_id, string project_id, i64 issued_at);
+    [Throws=MlsError]
+    bytes lor_request_signature(string context_json);
+    [Throws=MlsError]
+    boolean owns_key_package_ref(Provider provider, bytes reference);
+    [Throws=MlsError]
     KeyPackage key_package(Provider provider);
+    [Throws=MlsError]
     sequence<KeyPackage> key_packages(Provider provider, u32 count);
 
     [Throws=MlsError]
@@ -125,9 +163,13 @@ interface Identity {
 
     [Throws=MlsError, Name=from_bytes]
     constructor(Provider provider, bytes data);
+
+    [Throws=MlsError]
+    sequence<bytes> prepare_key_package_upload(Provider provider, string operation_id, string scope, string expected_provider_id, u32 count);
 };
 
 interface KeyPackage {
+    [Throws=MlsError]
     bytes to_bytes();
 
     [Throws=MlsError, Name=from_bytes]
@@ -150,6 +192,9 @@ interface Group {
 
     [Throws=MlsError, Name=create_with_group_id]
     constructor(Provider provider, Identity founder, bytes group_id);
+
+    [Throws=MlsError, Name=join_with_welcome_with_policy]
+    constructor(Provider provider, bytes welcome, RatchetTree? ratchet_tree, boolean allow_expired_tree_leaves);
 
     [Throws=MlsError, Name=join_with_welcome]
     constructor(Provider provider, bytes welcome, RatchetTree? ratchet_tree);
@@ -205,6 +250,9 @@ interface Group {
 
     [Throws=MlsError]
     ProcessedMessage process_message_deferred(Provider provider, bytes msg);
+
+    [Throws=MlsError]
+    ProcessedMessage process_message_with_context(Provider provider, bytes msg, string context_json, string event_id, string cid, u64 group_generation, u64 event_epoch, boolean defer_secret_persistence);
 
     [Throws=MlsError]
     bytes process_message_raw(Provider provider, bytes msg);
@@ -294,4 +342,59 @@ interface Group {
 
     [Throws=MlsError]
     CommitBundle self_update(Provider provider, Identity sender);
+};
+
+dictionary RecoveryKeys {
+    bytes private_key;
+    bytes public_key;
+    string key_id;
+    u16 ciphersuite;
+};
+dictionary RecoveryVaultMetadata {
+    bytes public_key;
+    string key_id;
+    u16 ciphersuite;
+};
+dictionary RecoveryArchiveBlob {
+    bytes ciphertext;
+    bytes nonce;
+    bytes aead_aad;
+    bytes adk;
+};
+dictionary RecoveryArchiveWrap {
+    bytes kem_output;
+    bytes ciphertext;
+    u16 ciphersuite;
+    bytes hpke_info;
+};
+
+dictionary RecoveryJournalEntry {
+    string key;
+    string kind;
+    string cid;
+    u64 group_generation;
+    u64 epoch;
+    string scope;
+    bytes payload;
+    string status;
+    u32 retry_count;
+    i64 created_at;
+    i64 next_retry_at;
+    string? last_error;
+};
+interface RecoveryJournal {
+    [Throws=MlsError]
+    constructor(string path);
+    [Throws=MlsError]
+    boolean insert_if_absent(RecoveryJournalEntry entry);
+    [Throws=MlsError]
+    void put(RecoveryJournalEntry entry);
+    [Throws=MlsError]
+    RecoveryJournalEntry? get(string key);
+    [Throws=MlsError]
+    sequence<RecoveryJournalEntry> page(string kind, string status, i64 now, string? cid, string? after_key, u32 limit);
+    [Throws=MlsError]
+    void remove(string key);
+    [Throws=MlsError]
+    void commit_upload(string pending_key, RecoveryJournalEntry ack, RecoveryJournalEntry? checkpoint);
 };

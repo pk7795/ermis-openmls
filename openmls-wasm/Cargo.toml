@@ -18,6 +18,8 @@ wasm-opt = false
 default = ["console_error_panic_hook"]
 
 [dependencies]
+ermis-lor-request-proof = { path = "../lor-request-proof" }
+openmls-recovery = { path = "../openmls-recovery" }
 wasm-bindgen = "0.2.84"
 openmls = { path = "../openmls", features = ["js"] }
 openmls_traits = { path = "../traits" }

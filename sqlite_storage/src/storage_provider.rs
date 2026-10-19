@@ -34,6 +34,14 @@ pub struct SqliteStorageProvider<C: Codec, ConnectionRef: Borrow<Connection>> {
 }
 
 impl<C: Codec, ConnectionRef: Borrow<Connection>> SqliteStorageProvider<C, ConnectionRef> {
+    /// The exact connection used by every OpenMLS storage read/write.
+    ///
+    /// Binding providers use this for transaction-scoped helper writes; callers
+    /// must serialize access and must not publish mutated state before commit.
+    pub fn connection(&self) -> &Connection {
+        self.connection.borrow()
+    }
+
     /// Create a new instance of the [`SqliteStorageProvider`].
     pub fn new(connection: ConnectionRef) -> Self {
         Self {

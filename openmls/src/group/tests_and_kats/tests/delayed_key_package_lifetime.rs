@@ -16,6 +16,7 @@ const KEY_PACKAGE_EXPIRES_AT: u64 = COMMIT_ACCEPTED_AT + 60;
 
 #[test]
 fn outgoing_add_still_rejects_an_expired_key_package() -> Result<(), String> {
+    let _validation_guard = crate::skip_validation::checks::leaf_node_lifetime::handle();
     let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
     let alice_party = CorePartyState::<OpenMlsRustCrypto>::new("fresh-alice");
     let bob_party = CorePartyState::<OpenMlsRustCrypto>::new("expired-bob");
@@ -57,6 +58,7 @@ fn outgoing_add_still_rejects_an_expired_key_package() -> Result<(), String> {
 
 #[test]
 fn delayed_add_commit_remains_processable_after_key_package_expiry() -> Result<(), String> {
+    let _validation_guard = crate::skip_validation::checks::leaf_node_lifetime::handle();
     let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
     let alice_party = CorePartyState::<OpenMlsRustCrypto>::new("alice");
     let bob_party = CorePartyState::<OpenMlsRustCrypto>::new("bob");

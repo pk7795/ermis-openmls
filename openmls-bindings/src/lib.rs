@@ -18,12 +18,13 @@ macro_rules! mls_debug {
 pub mod errors;
 pub mod group;
 pub mod identity;
+mod key_package_upload;
 pub mod provider;
 mod storage;
 pub mod types;
 
 pub use errors::MlsError;
-pub use group::{decrypt_epoch_archive_v2, join_external, Group};
+pub use group::{decrypt_epoch_archive_v2, join_external, join_external_with_policy, Group};
 pub use identity::{hash_channel_id, validate_key_package_bytes, Identity, KeyPackage};
 pub use provider::Provider;
 pub use types::*;

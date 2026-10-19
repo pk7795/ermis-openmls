@@ -8,12 +8,12 @@ use std::{
 use openmls::{
     credentials::BasicCredential,
     framing::{
-        MlsMessageBodyIn, MlsMessageIn, MlsMessageOut,
         errors::{MessageDecryptionError, SecretTreeError},
+        MlsMessageBodyIn, MlsMessageIn, MlsMessageOut,
     },
     group::{
-        GroupId, MlsGroup, MlsGroupJoinConfig, RecoveryDecryptOptions, StagedWelcome, WelcomeError,
-        decrypt_with_epoch_archive_v2,
+        decrypt_with_epoch_archive_v2, GroupId, MlsGroup, MlsGroupJoinConfig,
+        RecoveryDecryptOptions, StagedWelcome,
     },
     prelude::{LeafNodeIndex, ProcessMessageError, SenderRatchetConfiguration, ValidationError},
 };
@@ -22,7 +22,7 @@ use tls_codec::{Deserialize, Serialize};
 
 use crate::{
     errors::MlsError,
-    identity::{CIPHERSUITE, Identity, KeyPackage},
+    identity::{Identity, KeyPackage, CIPHERSUITE},
     provider::Provider,
     types::*,
 };
@@ -76,7 +76,7 @@ impl Group {
         if group_id_bytes.is_empty() || group_id_bytes.len() > 255 {
             return Err(MlsError::InvalidGroupId);
         }
-        let guard = provider.lock();
+        let guard = provider.lock()?;
 
         let mls_group = MlsGroup::builder()
             .ciphersuite(CIPHERSUITE)
@@ -113,7 +113,7 @@ impl Group {
             return Err(MlsError::InvalidGroupId);
         }
         let group_id = GroupId::from_slice(&group_id_bytes);
-        let guard = provider.lock();
+        let guard = provider.lock()?;
 
         let mls_group = MlsGroup::load(guard.storage(), &group_id)
             .map_err(|_| MlsError::StorageError)?
@@ -130,7 +130,7 @@ impl Group {
     /// the updated ratchet/secret tree state.
     pub fn save_state(&self, provider: &Provider) -> crate::MlsResult<()> {
         let group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
         group
             .store(prov_guard.storage())
             .map_err(|_| MlsError::StorageError)?;
@@ -140,7 +140,7 @@ impl Group {
     /// Delete this group's persisted OpenMLS state from the Provider storage.
     pub fn delete_state(&self, provider: &Provider) -> crate::MlsResult<()> {
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
         group.delete(prov_guard.storage()).map_err(|_| {
             mls_error!("[MLS] delete_state failed");
             MlsError::StorageError
@@ -154,8 +154,17 @@ impl Group {
         welcome: Vec<u8>,
         ratchet_tree: Option<RatchetTree>,
     ) -> crate::MlsResult<Self> {
-        let mut welcome_slice = welcome.as_slice();
-        let mls_welcome = match MlsMessageIn::tls_deserialize(&mut welcome_slice)
+        Self::join_with_welcome_with_policy(provider, welcome, ratchet_tree, false)
+    }
+
+    /// Opt-in AllowExpired for join trees. Legacy Welcome remains Verify.
+    pub fn join_with_welcome_with_policy(
+        provider: &Provider,
+        welcome: Vec<u8>,
+        ratchet_tree: Option<RatchetTree>,
+        allow_expired_tree_leaves: bool,
+    ) -> crate::MlsResult<Self> {
+        let mls_welcome = match MlsMessageIn::tls_deserialize_exact(&welcome)
             .map_err(|_| MlsError::DeserializationError)?
             .extract()
         {
@@ -170,21 +179,25 @@ impl Group {
             .build();
         let ratchet_tree_in = ratchet_tree.map(|rt| rt.inner.clone());
 
-        let guard = provider.lock();
-        let mls_group =
-            StagedWelcome::new_from_welcome(&*guard, &config, mls_welcome, ratchet_tree_in)
-                .map_err(|error| {
-                    mls_error!("[MLS] join_with_welcome: welcome validation failed");
-                    match error {
-                        WelcomeError::NoMatchingKeyPackage => MlsError::NoMatchingKeyPackage,
-                        _ => MlsError::InternalError,
-                    }
-                })?
-                .into_group(&*guard)
-                .map_err(|_| {
-                    mls_error!("[MLS] join_with_welcome: group creation failed");
-                    MlsError::InternalError
-                })?;
+        let guard = provider.lock()?;
+        let mls_group = guard.transaction(|persistent| {
+            let policy = if allow_expired_tree_leaves {
+                openmls::prelude::LeafNodeLifetimePolicy::AllowExpired
+            } else {
+                openmls::prelude::LeafNodeLifetimePolicy::Verify
+            };
+            let mut builder = StagedWelcome::build_from_welcome(persistent, &config, mls_welcome)
+                .map_err(MlsError::from_welcome)?
+                .lifetime_policy(policy);
+            if let Some(tree) = ratchet_tree_in {
+                builder = builder.with_ratchet_tree(tree);
+            }
+            builder
+                .build()
+                .map_err(MlsError::from_welcome)?
+                .into_group(persistent)
+                .map_err(MlsError::from_welcome)
+        })?;
 
         Ok(Group {
             mls_group: Arc::new(Mutex::new(mls_group)),
@@ -292,7 +305,7 @@ impl Group {
         with_ratchet_tree: bool,
     ) -> crate::MlsResult<Vec<u8>> {
         let group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
         let group_info = group
             .export_group_info(prov_guard.crypto(), &sender.keypair, with_ratchet_tree)
             .map_err(|_| MlsError::InternalError)?;
@@ -313,7 +326,7 @@ impl Group {
         key_length: u32,
     ) -> crate::MlsResult<Vec<u8>> {
         let group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
         group
             .export_secret(prov_guard.crypto(), &label, &context, key_length as usize)
             .map_err(|_| MlsError::CryptoError)
@@ -331,7 +344,7 @@ impl Group {
         plaintext: Vec<u8>,
     ) -> crate::MlsResult<Vec<u8>> {
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
         let msg_out = group
             .create_message(&*prov_guard, &sender.keypair, &plaintext)
             .map_err(|_| MlsError::InternalError)?;
@@ -388,6 +401,50 @@ impl Group {
         )
     }
 
+    /// Production handshake API: verify backend envelope metadata before mutation.
+    pub fn process_message_with_context(
+        &self,
+        provider: &Provider,
+        msg: Vec<u8>,
+        context_json: String,
+        event_id: String,
+        cid: String,
+        group_generation: u64,
+        event_epoch: u64,
+        defer_secret_persistence: bool,
+    ) -> crate::MlsResult<ProcessedMessage> {
+        use openmls::framing::{AcceptanceBinding, AcceptanceContext, AcceptanceContextError};
+        let context = AcceptanceContext::from_json(&context_json)
+            .map_err(|_| MlsError::AcceptanceMetadataInvalid)?;
+        let accepted_at = context
+            .validate(
+                AcceptanceBinding {
+                    event_id: &event_id,
+                    cid: &cid,
+                    group_generation,
+                    epoch: event_epoch,
+                },
+                &msg,
+            )
+            .map_err(|error| match error {
+                AcceptanceContextError::InvalidClock => MlsError::InvalidClock,
+                _ => MlsError::AcceptanceMetadataInvalid,
+            })?;
+        let protocol = MlsMessageIn::tls_deserialize_exact(&msg)
+            .map_err(|_| MlsError::DeserializationError)?
+            .try_into_protocol_message()
+            .map_err(|_| MlsError::InvalidMessage)?;
+        if !protocol.is_handshake_message() {
+            return Err(MlsError::InvalidMessage);
+        }
+        self.process_message_with_secret_persistence(
+            provider,
+            msg,
+            !defer_secret_persistence,
+            Some(accepted_at),
+        )
+    }
+
     /// Process an incoming application message while keeping the durable
     /// receiver ratchet at its previous state.
     pub fn process_message_deferred(
@@ -417,14 +474,22 @@ impl Group {
             MlsError::DeserializationError
         })?;
 
+        if !msg_slice.is_empty() {
+            return Err(MlsError::InvalidMessage);
+        }
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
 
         let processed_msg = match mls_msg.extract() {
             MlsMessageBodyIn::PublicMessage(msg) => {
                 mls_debug!("[MLS] process_message: msg_type=PublicMessage");
                 let result = match server_accepted_at_seconds {
-                    Some(accepted_at) => group.process_message_at(&*prov_guard, msg, accepted_at),
+                    Some(accepted_at) if persist_message_secrets => {
+                        group.process_message_at(&*prov_guard, msg, accepted_at)
+                    }
+                    Some(accepted_at) => {
+                        group.process_message_deferred_at(&*prov_guard, msg, accepted_at)
+                    }
                     None if persist_message_secrets => group.process_message(&*prov_guard, msg),
                     None => group.process_message_deferred(&*prov_guard, msg),
                 };
@@ -443,7 +508,12 @@ impl Group {
             MlsMessageBodyIn::PrivateMessage(msg) => {
                 mls_debug!("[MLS] process_message: msg_type=PrivateMessage");
                 let result = match server_accepted_at_seconds {
-                    Some(accepted_at) => group.process_message_at(&*prov_guard, msg, accepted_at),
+                    Some(accepted_at) if persist_message_secrets => {
+                        group.process_message_at(&*prov_guard, msg, accepted_at)
+                    }
+                    Some(accepted_at) => {
+                        group.process_message_deferred_at(&*prov_guard, msg, accepted_at)
+                    }
                     None if persist_message_secrets => group.process_message(&*prov_guard, msg),
                     None => group.process_message_deferred(&*prov_guard, msg),
                 };
@@ -499,7 +569,7 @@ impl Group {
             }
             openmls::framing::ProcessedMessageContent::ProposalMessage(proposal)
             | openmls::framing::ProcessedMessageContent::ExternalJoinProposalMessage(proposal) => {
-                let prov_guard = provider.lock();
+                let prov_guard = provider.lock()?;
                 group
                     .store_pending_proposal(prov_guard.storage(), *proposal)
                     .map_err(|_| {
@@ -515,7 +585,7 @@ impl Group {
                 })
             }
             openmls::framing::ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
-                let prov_guard = provider.lock();
+                let prov_guard = provider.lock()?;
                 group
                     .merge_staged_commit(&*prov_guard, *staged_commit)
                     .map_err(|_| {
@@ -555,7 +625,7 @@ impl Group {
         new_member: &KeyPackage,
     ) -> crate::MlsResult<ProposalMessage> {
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
 
         let (proposal_msg, proposal_ref) = group
             .propose_add_member(&*prov_guard, &sender.keypair, &new_member.inner)
@@ -584,7 +654,7 @@ impl Group {
         }
 
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
 
         let mut proposals = Vec::with_capacity(device_key_packages.len());
         for kp in &device_key_packages {
@@ -614,7 +684,7 @@ impl Group {
         member_index: u32,
     ) -> crate::MlsResult<ProposalMessage> {
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
         let leaf_index = LeafNodeIndex::new(member_index);
 
         let (proposal_msg, proposal_ref) = group
@@ -640,7 +710,7 @@ impl Group {
         user_id: String,
     ) -> crate::MlsResult<ProposalMessage> {
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
 
         let user_id_bytes: Vec<u8> = user_id.bytes().collect();
         let credential = BasicCredential::new(user_id_bytes);
@@ -678,7 +748,7 @@ impl Group {
         }
 
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
 
         let mut proposals = Vec::with_capacity(member_indices.len());
         for index in member_indices {
@@ -708,7 +778,7 @@ impl Group {
         sender: &Identity,
     ) -> crate::MlsResult<ProposalMessage> {
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
 
         let (proposal_msg, proposal_ref) = group
             .propose_self_update(
@@ -732,7 +802,7 @@ impl Group {
     /// Leave the group by creating a self-remove proposal
     pub fn leave_group(&self, provider: &Provider, sender: &Identity) -> crate::MlsResult<Vec<u8>> {
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
 
         let proposal_msg = group
             .leave_group(&*prov_guard, &sender.keypair)
@@ -758,7 +828,7 @@ impl Group {
     /// Clear all pending proposals
     pub fn clear_pending_proposals(&self, provider: &Provider) -> crate::MlsResult<()> {
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
         group
             .clear_pending_proposals(prov_guard.storage())
             .map_err(|_| MlsError::InternalError)?;
@@ -776,7 +846,7 @@ impl Group {
         sender: &Identity,
     ) -> crate::MlsResult<CommitBundle> {
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
 
         // Auto-clear stale pending commit from a previous failed operation
         if group.pending_commit().is_some() {
@@ -802,7 +872,7 @@ impl Group {
     /// Merge the pending commit after DS confirmation
     pub fn merge_pending_commit(&self, provider: &Provider) -> crate::MlsResult<()> {
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
         group.merge_pending_commit(&*prov_guard).map_err(|_| {
             mls_error!("[MLS] merge_pending_commit failed");
             MlsError::InternalError
@@ -813,7 +883,7 @@ impl Group {
     /// Discard the pending commit (rollback)
     pub fn clear_pending_commit(&self, provider: &Provider) -> crate::MlsResult<()> {
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
         group
             .clear_pending_commit(prov_guard.storage())
             .map_err(|_| MlsError::InternalError)?;
@@ -828,7 +898,7 @@ impl Group {
         new_members: Vec<KeyPackage>,
     ) -> crate::MlsResult<CommitBundle> {
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
 
         // Auto-clear stale pending commit
         if group.pending_commit().is_some() {
@@ -910,7 +980,7 @@ impl Group {
         member_indices: Vec<u32>,
     ) -> crate::MlsResult<CommitBundle> {
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
 
         if group.pending_commit().is_some() {
             mls_debug!("[MLS] remove_members: clearing stale pending commit");
@@ -995,7 +1065,7 @@ impl Group {
         force_self_update: bool,
     ) -> crate::MlsResult<CommitBundle> {
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
 
         if group.pending_commit().is_some() {
             mls_debug!("[MLS] commit_group_changes: clearing stale pending commit");
@@ -1122,7 +1192,7 @@ impl Group {
         sender: &Identity,
     ) -> crate::MlsResult<CommitBundle> {
         let mut group = self.lock_group();
-        let prov_guard = provider.lock();
+        let prov_guard = provider.lock()?;
 
         let bundle = group
             .self_update(
@@ -1149,7 +1219,7 @@ pub fn decrypt_epoch_archive_v2(
     allow_own_messages: bool,
     max_forward_distance: u32,
 ) -> crate::MlsResult<ArchivedMessage> {
-    let provider = provider.lock();
+    let provider = provider.lock()?;
     let plaintext = decrypt_with_epoch_archive_v2(
         provider.crypto(),
         &archive,
@@ -1189,48 +1259,82 @@ fn map_process_message_error<StorageError>(error: ProcessMessageError<StorageErr
 // Standalone binding-neutral operations
 // ============================================================================
 
-/// Join a group via External Commit
-#[allow(deprecated)]
+/// Join a group via External Commit; legacy policy remains Verify.
 pub fn join_external(
     provider: &Provider,
     identity: &Identity,
     group_info: Vec<u8>,
     ratchet_tree: Option<RatchetTree>,
 ) -> crate::MlsResult<ExternalJoinResult> {
-    let mut gi_slice = group_info.as_slice();
-    let mls_message =
-        MlsMessageIn::tls_deserialize(&mut gi_slice).map_err(|_| MlsError::DeserializationError)?;
+    join_external_with_policy(provider, identity, group_info, ratchet_tree, false)
+}
 
+/// Opt-in tree expiry policy. This producer transaction does not establish a
+/// backend receipt: SDKs must retain pending candidates until server acceptance.
+pub fn join_external_with_policy(
+    provider: &Provider,
+    identity: &Identity,
+    group_info: Vec<u8>,
+    ratchet_tree: Option<RatchetTree>,
+    allow_expired_tree_leaves: bool,
+) -> crate::MlsResult<ExternalJoinResult> {
+    let mls_message = MlsMessageIn::tls_deserialize_exact(&group_info)
+        .map_err(|_| MlsError::DeserializationError)?;
     let verified_group_info = match mls_message.extract() {
-        MlsMessageBodyIn::GroupInfo(gi) => Ok(gi),
-        _ => Err(MlsError::InvalidMessage),
-    }?;
-
-    let ratchet_tree_in = ratchet_tree.map(|rt| rt.inner.clone());
-
-    let guard = provider.lock();
-    let (mls_group, commit_msg, _group_info) = MlsGroup::join_by_external_commit(
-        &*guard,
-        &identity.keypair,
-        ratchet_tree_in,
-        verified_group_info,
-        &MlsGroupJoinConfig::builder()
-            .use_ratchet_tree_extension(true)
-            .max_past_epochs(5)
-            .sender_ratchet_configuration(SenderRatchetConfiguration::new(10, 2000))
-            .build(),
-        None,
-        None,
-        &[],
-        identity.credential_with_key.clone(),
-    )
-    .map_err(|_| MlsError::ExternalCommitError)?;
-
-    let mut commit_bytes = vec![];
-    commit_msg
-        .tls_serialize(&mut commit_bytes)
-        .map_err(|_| MlsError::SerializationError)?;
-
+        MlsMessageBodyIn::GroupInfo(gi) => gi,
+        _ => return Err(MlsError::GroupInfoInvalid),
+    };
+    let guard = provider.lock()?;
+    let (mls_group, commit_bytes) = guard.transaction(|persistent| {
+        let policy = if allow_expired_tree_leaves {
+            openmls::prelude::LeafNodeLifetimePolicy::AllowExpired
+        } else {
+            openmls::prelude::LeafNodeLifetimePolicy::Verify
+        };
+        let mut builder = MlsGroup::external_commit_builder()
+            .lifetime_policy(policy)
+            .with_config(
+                MlsGroupJoinConfig::builder()
+                    .use_ratchet_tree_extension(true)
+                    .max_past_epochs(5)
+                    .sender_ratchet_configuration(SenderRatchetConfiguration::new(10, 2000))
+                    .build(),
+            );
+        if let Some(tree) = ratchet_tree {
+            builder = builder.with_ratchet_tree(tree.inner.clone());
+        }
+        let (group, bundle) = builder
+            .build_group(
+                persistent,
+                verified_group_info,
+                identity.credential_with_key.clone(),
+            )
+            .map_err(|error| match error {
+                openmls::prelude::ExternalCommitBuilderError::PublicGroupError(error) => {
+                    MlsError::from_creation(error)
+                }
+                openmls::prelude::ExternalCommitBuilderError::StorageError(_) => {
+                    MlsError::StorageError
+                }
+                _ => MlsError::GroupInfoInvalid,
+            })?
+            .load_psks(persistent.storage())
+            .map_err(|_| MlsError::CryptoError)?
+            .build(
+                persistent.rand(),
+                persistent.crypto(),
+                &identity.keypair,
+                |_| true,
+            )
+            .map_err(|_| MlsError::ExternalCommitError)?
+            .finalize(persistent)
+            .map_err(|_| MlsError::StorageError)?;
+        let (commit, _, _) = bundle.into_contents();
+        let bytes = commit
+            .tls_serialize_detached()
+            .map_err(|_| MlsError::SerializationError)?;
+        Ok((group, bytes))
+    })?;
     Ok(ExternalJoinResult {
         group: Group {
             mls_group: Arc::new(Mutex::new(mls_group)),

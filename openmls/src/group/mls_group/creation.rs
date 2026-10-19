@@ -592,6 +592,10 @@ pub enum LeafNodeLifetimePolicy {
 
     /// Skip the verification of the lifeimte in leaf nodes in the ratchet tree.
     Skip,
+
+    /// Permit expired KeyPackage-source leaves in join trees only.
+    /// Range, not-before, capabilities, signatures and tree integrity stay checked.
+    AllowExpired,
 }
 
 /// Builder for joining a group.
@@ -618,6 +622,13 @@ impl<'a, Provider: OpenMlsProvider> JoinBuilder<'a, Provider> {
     /// The ratchet tree to use for the new group.
     pub fn with_ratchet_tree(mut self, ratchet_tree: RatchetTreeIn) -> Self {
         self.ratchet_tree = Some(ratchet_tree);
+        self
+    }
+
+    /// Select join-tree lifetime policy. Existing APIs default to Verify.
+    /// AllowExpired never relaxes validation for newly generated Add proposals.
+    pub fn lifetime_policy(mut self, policy: LeafNodeLifetimePolicy) -> Self {
+        self.validate_lifetimes = policy;
         self
     }
 

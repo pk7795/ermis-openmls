@@ -12,6 +12,19 @@ The main goals are:
 
 ## POC Notes
 
+### 2026-10-09 — Read-only public GroupInfo validation
+
+<details>
+<summary>Change log</summary>
+
+- Added `Group.validate_group_info_with_policy(provider, identity, group_info, allow_expired_tree_leaves)` and `GroupInfoValidation` with validated `epoch`/`group_id`/`ratchet_tree_sha256` getters. The tree digest enables consumers to reject same-epoch forks against durable local state. Exact input is bounded to 1 MiB. Existing methods and Verify defaults remain unchanged. Pair generated JS/types/WASM metadata before consuming this additive API.
+
+</details>
+
+Validation uses the same signature, embedded tree, protocol, leaf lifetime and external-public-key checks as production External Join, stopping after `ExternalCommitBuilder.build_group`. It does not build/finalize a commit, write provider state, consume a KeyPackage, change membership, publish Ready or prove a durable client checkpoint. It validates public cryptography; confirmation-tag MAC requires epoch secrets. Explicit AllowExpired applies only the existing locked tree-leaf policy and does not skip other validation. The API returns no private data.
+
+WASM core clock sampling now checks original JS milliseconds before integer conversion; nonfinite, zero, negative, subsecond and overflowing values fail as InvalidClock rather than becoming epoch zero. Native checked SystemTime and single-sample operation semantics remain. Verification, source/artifact identity, failed reports and consumer ACK dependencies are in the [canonical implementation plan](../../bellboy/docs/todo/e2ee_mls_lifetime_ownership_recovery_plan.md) and [authoritative ledger](../../bellboy/docs/todo/e2ee_mls_lifetime_ownership_recovery_ledger.md), LOR-DEC-021/022. Consumer ACK/durable proof/device gates remain open.
+
 ### 2026-09-03 - Typed partial-Welcome recovery boundary
 
 - Added `Group.join_with_welcome_typed(...)` without changing the legacy

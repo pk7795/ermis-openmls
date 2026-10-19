@@ -119,6 +119,12 @@ impl ExternalCommitBuilder {
         self
     }
 
+    /// Select join-tree lifetime policy; fresh Add validation stays strict.
+    pub fn lifetime_policy(mut self, policy: LeafNodeLifetimePolicy) -> Self {
+        self.validate_lifetimes = policy;
+        self
+    }
+
     /// Skip the validation of lifetimes in leaf nodes in the ratchet tree.
     /// Note that only the leaf nodes are checked that were never updated.
     ///

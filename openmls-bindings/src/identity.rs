@@ -36,7 +36,7 @@ impl Identity {
         let credential = BasicCredential::new(identity_bytes);
         let keypair = SignatureKeyPair::new(signature_scheme).map_err(|_| MlsError::CryptoError)?;
 
-        let guard = provider.lock();
+        let guard = provider.lock()?;
         keypair
             .store(guard.storage())
             .map_err(|_| MlsError::StorageError)?;
@@ -58,25 +58,125 @@ impl Identity {
         self.user_id.clone()
     }
 
+    /// Signs only a validated, domain-separated LOR control request.
+    pub fn lor_request_signature(&self, context_json: String) -> crate::MlsResult<Vec<u8>> {
+        use openmls_traits::signatures::Signer;
+        let context = ermis_lor_request_proof::SigningContext::parse(&context_json)
+            .map_err(|_| MlsError::SerializationError)?;
+        let payload = context.payload(&self.user_id, CIPHERSUITE as u16)
+            .map_err(|_| MlsError::SerializationError)?;
+        self.keypair.sign(&payload).map_err(|_| MlsError::CryptoError)
+    }
+
+    pub fn signature_public_key(&self) -> Vec<u8> {
+        self.keypair.public().to_vec()
+    }
+
+    /// Domain-bound proof for logical registration; never signs arbitrary app data.
+    pub fn device_registration_signature(
+        &self,
+        device_id: String,
+        project_id: String,
+        issued_at: i64,
+    ) -> crate::MlsResult<Vec<u8>> {
+        use openmls_traits::signatures::Signer;
+        if device_id.is_empty()
+            || device_id.len() > 256
+            || device_id.chars().any(char::is_control)
+            || issued_at <= 0
+            || project_id.len() != 36
+        {
+            return Err(MlsError::SerializationError);
+        }
+        let payload = serde_json::to_vec(&(
+            "ermis.mls-device-registration.v1",
+            &self.user_id,
+            project_id,
+            device_id,
+            CIPHERSUITE as u16,
+            issued_at,
+        ))
+        .map_err(|_| MlsError::SerializationError)?;
+        self.keypair
+            .sign(&payload)
+            .map_err(|_| MlsError::CryptoError)
+    }
+
+    /// Inspect the private bundle without consuming it or exposing private keys.
+    /// Storage errors are distinct from an absent or foreign signing identity.
+    pub fn owns_key_package_ref(
+        &self,
+        provider: &Provider,
+        reference: Vec<u8>,
+    ) -> crate::MlsResult<bool> {
+        use openmls::prelude::{KeyPackageBundle, KeyPackageRef};
+        if reference.len() != 32 {
+            return Err(MlsError::SerializationError);
+        }
+        let encoded = tls_codec::VLBytes::new(reference)
+            .tls_serialize_detached()
+            .map_err(|_| MlsError::SerializationError)?;
+        let reference = KeyPackageRef::tls_deserialize_exact(&encoded)
+            .map_err(|_| MlsError::SerializationError)?;
+        let guard = provider.lock()?;
+        let bundle: Option<KeyPackageBundle> = guard
+            .storage()
+            .key_package(&reference)
+            .map_err(|_| MlsError::StorageError)?;
+        let Some(bundle) = bundle else {
+            return Ok(false);
+        };
+        // Verify the bundle reference before using its signing identity. A
+        // corrupt/foreign row is uncertain and must never authorize retirement.
+        let actual_reference = bundle
+            .key_package()
+            .hash_ref(guard.crypto())
+            .map_err(|_| MlsError::CryptoError)?;
+        if actual_reference != reference {
+            return Err(MlsError::StorageCorruption);
+        }
+        Ok(bundle.key_package().leaf_node().signature_key().as_slice() == self.keypair.public())
+    }
+
     /// Generate a single key package for this identity
-    pub fn key_package(&self, provider: &Provider) -> KeyPackage {
-        let guard = provider.lock();
-        KeyPackage {
+    pub fn key_package(&self, provider: &Provider) -> crate::MlsResult<KeyPackage> {
+        let guard = provider.lock()?;
+        self.key_package_in(&guard)
+    }
+
+    pub(crate) fn key_package_in(
+        &self,
+        guard: &crate::storage::PersistentCryptoProvider,
+    ) -> crate::MlsResult<KeyPackage> {
+        Ok(KeyPackage {
             inner: OpenMlsKeyPackage::builder()
                 .build(
                     CIPHERSUITE,
-                    &*guard,
+                    guard,
                     &self.keypair,
                     self.credential_with_key.clone(),
                 )
-                .unwrap()
+                .map_err(|error| match error {
+                    openmls::prelude::KeyPackageNewError::LifetimeCreation(
+                        openmls::key_packages::LifetimeCreationError::InvalidClock,
+                    ) => MlsError::InvalidClock,
+                    openmls::prelude::KeyPackageNewError::LifetimeCreation(_) => {
+                        MlsError::LifetimeRangeInvalid
+                    }
+                    openmls::prelude::KeyPackageNewError::StorageError => MlsError::StorageError,
+                    _ => MlsError::CryptoError,
+                })?
                 .key_package()
                 .clone(),
-        }
+        })
     }
 
     /// Generate multiple key packages
-    pub fn key_packages(&self, provider: &Provider, count: u32) -> Vec<KeyPackage> {
+    pub fn key_packages(
+        &self,
+        provider: &Provider,
+        count: u32,
+    ) -> crate::MlsResult<Vec<KeyPackage>> {
         (0..count).map(|_| self.key_package(provider)).collect()
     }
 
@@ -114,7 +214,7 @@ impl Identity {
         let keypair = SignatureKeyPair::tls_deserialize(&mut keypair_slice)
             .map_err(|_| MlsError::DeserializationError)?;
 
-        let guard = provider.lock();
+        let guard = provider.lock()?;
         // Delete any existing entry first — SqliteStorageProvider uses INSERT
         // (not INSERT OR REPLACE), so re-storing the same public key would
         // violate the UNIQUE constraint.
@@ -160,8 +260,10 @@ impl Clone for KeyPackage {
 
 impl KeyPackage {
     /// Serialize this KeyPackage to bytes
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.inner.tls_serialize_detached().unwrap()
+    pub fn to_bytes(&self) -> crate::MlsResult<Vec<u8>> {
+        self.inner
+            .tls_serialize_detached()
+            .map_err(|_| MlsError::SerializationError)
     }
 
     /// Deserialize a KeyPackage from bytes
@@ -180,7 +282,7 @@ impl KeyPackage {
 
     /// Get the hash reference of this key package
     pub fn hash_ref(&self, provider: &Provider) -> crate::MlsResult<Vec<u8>> {
-        let guard = provider.lock();
+        let guard = provider.lock()?;
         let hash_ref = self
             .inner
             .hash_ref(guard.crypto())

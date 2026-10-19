@@ -41,6 +41,7 @@ wasm-bindgen-test = { version = "0.3.50", optional = true }
 getrandom = { version = "0.3.4", optional = true }
 getrandom_old = { package = "getrandom", version = "0.2.15", optional = true }
 fluvio-wasm-timer = { version = "0.2.5", optional = true }
+js-sys = { version = "0.3", optional = true }
 once_cell = { version = "1.19.0", optional = true }
 zeroize = "1.8.1"
 serde_bytes = "0.11.17"
@@ -71,6 +72,7 @@ content-debug = [] # ☣️ Enable logging of sensitive message content
 js = [
     "dep:getrandom",
     "dep:fluvio-wasm-timer",
+    "dep:js-sys",
 
     # enable randomness source
     "getrandom/wasm_js",

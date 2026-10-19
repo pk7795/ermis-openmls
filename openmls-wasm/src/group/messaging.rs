@@ -3,17 +3,21 @@
 use openmls::{
     framing::{MlsMessageBodyIn, MlsMessageIn},
     group::{
-        MlsGroup, RecoveryDecryptOptions,
         decrypt_with_epoch_archive as openmls_decrypt_with_epoch_archive,
         decrypt_with_epoch_archive_v2 as openmls_decrypt_with_epoch_archive_v2,
-        peek_sender_data_from_archive as openmls_peek_sender_data_from_archive,
+        peek_sender_data_from_archive as openmls_peek_sender_data_from_archive, MlsGroup,
+        RecoveryDecryptOptions,
     },
 };
 use openmls_traits::OpenMlsProvider;
 use tls_codec::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
-use crate::{Group, Provider, identity::Identity};
+use crate::{
+    errors::{MlsError, MlsErrorCode},
+    identity::Identity,
+    Group, Provider,
+};
 
 /// Type of processed message
 #[wasm_bindgen]
@@ -332,7 +336,66 @@ impl Group {
         provider: &mut Provider,
         msg: &[u8],
     ) -> Result<ProcessedMessage, JsError> {
-        self.process_message_for(provider, msg, None)
+        self.process_message_for(provider, msg, None, false)
+            .map_err(|error| JsError::new(&error.to_string()))
+    }
+
+    /// Application-only deferred validation: contextual AAD must pass before
+    /// durable ratchet mutation. Any rejection reloads the previous durable group.
+    pub fn process_application_message(
+        &mut self,
+        provider: &Provider,
+        msg: &[u8],
+        expected_aad: Option<Vec<u8>>,
+    ) -> Result<ProcessedMessage, JsError> {
+        let input = MlsMessageIn::tls_deserialize_exact(msg)
+            .map_err(|_| JsError::new("Invalid application message encoding"))?;
+        let result = match input.extract() {
+            MlsMessageBodyIn::PrivateMessage(message) => self
+                .mls_group
+                .process_message_deferred(provider.as_ref(), message),
+            _ => return Err(JsError::new("Expected a private application message")),
+        };
+        let processed = match result {
+            Ok(message) => message,
+            Err(error) => {
+                self.restore_durable_group_after_historical_failure(provider)?;
+                return Err(JsError::new(&error.to_string()));
+            }
+        };
+        let aad = processed.aad().to_vec();
+        let epoch = processed.epoch().as_u64();
+        let sender_index = match processed.sender() {
+            openmls::prelude::Sender::Member(index) => index.u32(),
+            _ => {
+                self.restore_durable_group_after_historical_failure(provider)?;
+                return Err(JsError::new("Expected a member application message"));
+            }
+        };
+        if expected_aad.is_some_and(|expected| expected != aad) {
+            self.restore_durable_group_after_historical_failure(provider)?;
+            return Err(JsError::new("MLS AAD mismatch"));
+        }
+        let content = match processed.into_content() {
+            openmls::framing::ProcessedMessageContent::ApplicationMessage(message) => {
+                message.into_bytes()
+            }
+            _ => {
+                self.restore_durable_group_after_historical_failure(provider)?;
+                return Err(JsError::new("Expected an application message"));
+            }
+        };
+        if let Err(error) = self.save_state(provider) {
+            self.restore_durable_group_after_historical_failure(provider)?;
+            return Err(error);
+        }
+        Ok(ProcessedMessage {
+            message_type: MessageType::ApplicationMessage,
+            content: Some(content),
+            sender_index,
+            epoch,
+            aad,
+        })
     }
 
     /// Process a durable handshake event using the trusted Bellboy acceptance
@@ -343,7 +406,64 @@ impl Group {
         msg: &[u8],
         server_accepted_at_seconds: u64,
     ) -> Result<ProcessedMessage, JsError> {
-        self.process_message_for(provider, msg, Some(server_accepted_at_seconds))
+        self.process_message_for(provider, msg, Some(server_accepted_at_seconds), false)
+            .map_err(|error| JsError::new(&error.to_string()))
+    }
+
+    /// Context-verified handshake processing for both live and history lanes.
+    pub fn process_message_with_context(
+        &mut self,
+        provider: &mut Provider,
+        msg: &[u8],
+        context_json: &str,
+        event_id: &str,
+        cid: &str,
+        group_generation: u64,
+        event_epoch: u64,
+        defer_secret_persistence: bool,
+    ) -> Result<ProcessedMessage, MlsError> {
+        use openmls::framing::{AcceptanceBinding, AcceptanceContext, AcceptanceContextError};
+        let context = AcceptanceContext::from_json(context_json).map_err(|_| {
+            MlsError::new(
+                MlsErrorCode::AcceptanceMetadataInvalid,
+                "Acceptance metadata rejected",
+            )
+        })?;
+        let accepted_at = context
+            .validate(
+                AcceptanceBinding {
+                    event_id,
+                    cid,
+                    group_generation,
+                    epoch: event_epoch,
+                },
+                msg,
+            )
+            .map_err(|error| {
+                MlsError::new(
+                    match error {
+                        AcceptanceContextError::InvalidClock => MlsErrorCode::InvalidClock,
+                        _ => MlsErrorCode::AcceptanceMetadataInvalid,
+                    },
+                    "Acceptance metadata rejected",
+                )
+            })?;
+        let protocol = MlsMessageIn::tls_deserialize_exact(msg)
+            .map_err(|_| {
+                MlsError::new(
+                    MlsErrorCode::DeserializationError,
+                    "Invalid handshake encoding",
+                )
+            })?
+            .try_into_protocol_message()
+            .map_err(|_| MlsError::new(MlsErrorCode::InvalidMessage, "Expected handshake"))?;
+        if !protocol.is_handshake_message() {
+            return Err(MlsError::new(
+                MlsErrorCode::InvalidMessage,
+                "Expected handshake",
+            ));
+        }
+        self.process_message_for(provider, msg, Some(accepted_at), defer_secret_persistence)
     }
 
     fn process_message_for(
@@ -351,14 +471,28 @@ impl Group {
         provider: &mut Provider,
         msg: &[u8],
         server_accepted_at_seconds: Option<u64>,
-    ) -> Result<ProcessedMessage, JsError> {
+        defer_secret_persistence: bool,
+    ) -> Result<ProcessedMessage, MlsError> {
         let mut msg_slice = msg;
-        let mls_msg = MlsMessageIn::tls_deserialize(&mut msg_slice)
-            .map_err(|e| JsError::new(&format!("Message deserialization error: {e}")))?;
+        let mls_msg = MlsMessageIn::tls_deserialize(&mut msg_slice).map_err(|_| {
+            MlsError::new(
+                MlsErrorCode::DeserializationError,
+                "Message deserialization failed",
+            )
+        })?;
 
+        if !msg_slice.is_empty() {
+            return Err(MlsError::new(
+                MlsErrorCode::InvalidMessage,
+                "Trailing message bytes",
+            ));
+        }
         let processed_msg = match mls_msg.extract() {
             MlsMessageBodyIn::PublicMessage(msg) => {
                 let result = match server_accepted_at_seconds {
+                    Some(accepted_at) if defer_secret_persistence => self
+                        .mls_group
+                        .process_message_deferred_at(provider.as_ref(), msg, accepted_at),
                     Some(accepted_at) => {
                         self.mls_group
                             .process_message_at(provider.as_ref(), msg, accepted_at)
@@ -366,12 +500,18 @@ impl Group {
                     None => self.mls_group.process_message(provider.as_ref(), msg),
                 };
                 if result.is_err() && server_accepted_at_seconds.is_some() {
-                    self.restore_durable_group_after_historical_failure(provider)?;
+                    self.restore_durable_group_after_historical_failure(provider)
+                        .map_err(|_| {
+                            MlsError::new(MlsErrorCode::StorageError, "Durable group reload failed")
+                        })?;
                 }
-                result?
+                result.map_err(map_process_error)?
             }
             MlsMessageBodyIn::PrivateMessage(msg) => {
                 let result = match server_accepted_at_seconds {
+                    Some(accepted_at) if defer_secret_persistence => self
+                        .mls_group
+                        .process_message_deferred_at(provider.as_ref(), msg, accepted_at),
                     Some(accepted_at) => {
                         self.mls_group
                             .process_message_at(provider.as_ref(), msg, accepted_at)
@@ -379,22 +519,30 @@ impl Group {
                     None => self.mls_group.process_message(provider.as_ref(), msg),
                 };
                 if result.is_err() && server_accepted_at_seconds.is_some() {
-                    self.restore_durable_group_after_historical_failure(provider)?;
+                    self.restore_durable_group_after_historical_failure(provider)
+                        .map_err(|_| {
+                            MlsError::new(MlsErrorCode::StorageError, "Durable group reload failed")
+                        })?;
                 }
-                result?
+                result.map_err(map_process_error)?
             }
             MlsMessageBodyIn::Welcome(_) => {
-                return Err(JsError::new(
+                return Err(MlsError::new(
+                    MlsErrorCode::InvalidMessage,
                     "Use Group::join_with_welcome for Welcome messages",
                 ));
             }
             MlsMessageBodyIn::GroupInfo(_) => {
-                return Err(JsError::new(
+                return Err(MlsError::new(
+                    MlsErrorCode::InvalidMessage,
                     "Use Group::join_external for GroupInfo messages",
                 ));
             }
             MlsMessageBodyIn::KeyPackage(_) => {
-                return Err(JsError::new("KeyPackage should be processed separately"));
+                return Err(MlsError::new(
+                    MlsErrorCode::InvalidMessage,
+                    "KeyPackage should be processed separately",
+                ));
             }
         };
 
@@ -424,7 +572,10 @@ impl Group {
             openmls::framing::ProcessedMessageContent::ProposalMessage(proposal)
             | openmls::framing::ProcessedMessageContent::ExternalJoinProposalMessage(proposal) => {
                 self.mls_group
-                    .store_pending_proposal(provider.0.storage(), *proposal)?;
+                    .store_pending_proposal(provider.0.storage(), *proposal)
+                    .map_err(|_| {
+                        MlsError::new(MlsErrorCode::StorageError, "Proposal persistence failed")
+                    })?;
                 Ok(ProcessedMessage {
                     message_type: MessageType::Proposal,
                     content: None,
@@ -435,7 +586,10 @@ impl Group {
             }
             openmls::framing::ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
                 self.mls_group
-                    .merge_staged_commit(provider.as_mut(), *staged_commit)?;
+                    .merge_staged_commit(provider.as_mut(), *staged_commit)
+                    .map_err(|_| {
+                        MlsError::new(MlsErrorCode::StorageError, "Commit persistence failed")
+                    })?;
                 Ok(ProcessedMessage {
                     message_type: MessageType::Commit,
                     content: None,
@@ -480,4 +634,16 @@ impl Group {
         self.mls_group = durable_group;
         Ok(())
     }
+}
+
+fn map_process_error<E>(error: openmls::prelude::ProcessMessageError<E>) -> MlsError {
+    use openmls::prelude::{ProcessMessageError, ValidationError};
+    let code = match error {
+        ProcessMessageError::StorageError(_) => MlsErrorCode::StorageError,
+        ProcessMessageError::ValidationError(ValidationError::WrongEpoch) => {
+            MlsErrorCode::EpochConflict
+        }
+        _ => MlsErrorCode::InvalidMessage,
+    };
+    MlsError::new(code, "Protocol validation failed")
 }

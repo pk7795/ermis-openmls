@@ -46,6 +46,10 @@ impl Provider {
         self.inner.load_identity().map_err(MlsError::from_core)
     }
 
+    pub fn key_package_upload_provider_id(&self) -> Result<String, MlsError> {
+        self.inner.key_package_upload_provider_id().map_err(MlsError::from_core)
+    }
+
     pub fn delete_identity(&self) -> Result<(), MlsError> {
         self.inner.delete_identity().map_err(MlsError::from_core)
     }

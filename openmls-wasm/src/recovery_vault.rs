@@ -269,24 +269,9 @@ impl HpkeWrappedArchiveDataKey {
 
 #[wasm_bindgen]
 pub fn generate_recovery_keypair(provider: &Provider) -> Result<RecoveryKeypair, JsError> {
-    let ikm = provider
-        .0
-        .rand()
-        .random_vec(32)
-        .map_err(|e| JsError::new(&format!("recovery keypair random: {e:?}")))?;
-    let keypair = provider
-        .0
-        .crypto()
-        .derive_hpke_keypair(CIPHERSUITE.hpke_config(), &ikm)
-        .map_err(|e| JsError::new(&format!("derive recovery keypair: {e:?}")))?;
-    let public_key = keypair.public.to_vec();
-    let key_id = hex::encode(&Sha256::digest(&public_key)[..16]);
-    Ok(RecoveryKeypair {
-        private_key: keypair.private.to_vec(),
-        public_key,
-        key_id,
-        ciphersuite: CIPHERSUITE.into(),
-    })
+
+let value = openmls_recovery::generate_recovery_keypair(&provider.0).map_err(core_error)?;
+Ok(RecoveryKeypair { private_key: value.private_key, public_key: value.public_key, key_id: value.key_id, ciphersuite: value.ciphersuite })
 }
 
 #[wasm_bindgen]
@@ -299,43 +284,9 @@ pub fn wrap_recovery_private_key(
     ciphersuite: u16,
     iterations: u32,
 ) -> Result<WrappedRecoveryKey, JsError> {
-    validate_pin(pin)?;
-    if iterations < MIN_PBKDF2_ITERATIONS {
-        return Err(JsError::new("PBKDF2 iterations must be >= 600,000"));
-    }
-    let salt = provider
-        .0
-        .rand()
-        .random_vec(16)
-        .map_err(|e| JsError::new(&format!("{e:?}")))?;
-    let nonce = provider
-        .0
-        .rand()
-        .random_vec(12)
-        .map_err(|e| JsError::new(&format!("{e:?}")))?;
-    let key = derive_pin_key(pin, &salt, iterations);
-    let wrapped_private_key = provider
-        .0
-        .crypto()
-        .aead_encrypt(
-            AeadType::Aes256Gcm,
-            &key,
-            private_key,
-            &nonce,
-            key_id.as_bytes(),
-        )
-        .map_err(|e| JsError::new(&format!("wrap recovery key: {e:?}")))?;
-    Ok(WrappedRecoveryKey {
-        version: 1,
-        kdf: "PBKDF2-SHA256".to_string(),
-        iterations,
-        salt,
-        nonce,
-        wrapped_private_key,
-        public_key: public_key.to_vec(),
-        key_id: key_id.to_string(),
-        ciphersuite,
-    })
+
+let value = openmls_recovery::wrap_recovery_private_key(&provider.0, pin, private_key, public_key, key_id, ciphersuite, iterations).map_err(core_error)?;
+Ok(WrappedRecoveryKey { version: value.version, kdf: value.kdf, iterations: value.iterations, salt: value.salt, nonce: value.nonce, wrapped_private_key: value.wrapped_private_key, public_key: value.public_key, key_id: value.key_id, ciphersuite: value.ciphersuite })
 }
 
 #[wasm_bindgen]
@@ -344,19 +295,8 @@ pub fn unwrap_recovery_private_key(
     pin: &str,
     wrapped: &WrappedRecoveryKey,
 ) -> Result<Vec<u8>, JsError> {
-    validate_pin(pin)?;
-    let key = derive_pin_key(pin, &wrapped.salt, wrapped.iterations);
-    provider
-        .0
-        .crypto()
-        .aead_decrypt(
-            AeadType::Aes256Gcm,
-            &key,
-            &wrapped.wrapped_private_key,
-            &wrapped.nonce,
-            wrapped.key_id.as_bytes(),
-        )
-        .map_err(|e| JsError::new(&format!("unwrap recovery key: {e:?}")))
+let core_wrapped = openmls_recovery::WrappedRecoveryKey::from_bytes(&wrapped.to_bytes()?).map_err(core_error)?;
+openmls_recovery::unwrap_recovery_private_key(&provider.0, pin, &core_wrapped).map_err(core_error)
 }
 
 #[wasm_bindgen]
@@ -365,28 +305,9 @@ pub fn encrypt_archive_blob(
     archive_bytes: &[u8],
     aad: &ArchiveBlobAad,
 ) -> Result<EncryptedArchiveBlob, JsError> {
-    let adk = provider
-        .0
-        .rand()
-        .random_vec(32)
-        .map_err(|e| JsError::new(&format!("{e:?}")))?;
-    let nonce = provider
-        .0
-        .rand()
-        .random_vec(12)
-        .map_err(|e| JsError::new(&format!("{e:?}")))?;
-    let aead_aad = aad.to_bytes()?;
-    let ciphertext = provider
-        .0
-        .crypto()
-        .aead_encrypt(AeadType::Aes256Gcm, &adk, archive_bytes, &nonce, &aead_aad)
-        .map_err(|e| JsError::new(&format!("encrypt archive blob: {e:?}")))?;
-    Ok(EncryptedArchiveBlob {
-        ciphertext,
-        nonce,
-        aead_aad,
-        adk,
-    })
+let core_aad: openmls_recovery::ArchiveBlobAad = serde_json::from_slice(&aad.to_bytes()?).map_err(|_| JsError::new("Invalid archive AAD"))?;
+let value = openmls_recovery::encrypt_archive_blob(&provider.0, archive_bytes, &core_aad).map_err(core_error)?;
+Ok(EncryptedArchiveBlob { ciphertext: value.ciphertext, nonce: value.nonce, aead_aad: value.aead_aad, adk: value.adk })
 }
 
 #[wasm_bindgen]
@@ -397,11 +318,8 @@ pub fn decrypt_archive_blob(
     nonce: &[u8],
     aead_aad: &[u8],
 ) -> Result<Vec<u8>, JsError> {
-    provider
-        .0
-        .crypto()
-        .aead_decrypt(AeadType::Aes256Gcm, adk, ciphertext, nonce, aead_aad)
-        .map_err(|e| JsError::new(&format!("decrypt archive blob: {e:?}")))
+
+openmls_recovery::decrypt_archive_blob(&provider.0, adk, ciphertext, nonce, aead_aad).map_err(core_error)
 }
 
 #[wasm_bindgen]
@@ -411,24 +329,9 @@ pub fn wrap_archive_data_key(
     recipient_recovery_public_key: &[u8],
     info: &ArchiveKeyWrapInfo,
 ) -> Result<HpkeWrappedArchiveDataKey, JsError> {
-    let hpke_info = info.to_bytes()?;
-    let ct = provider
-        .0
-        .crypto()
-        .hpke_seal(
-            CIPHERSUITE.hpke_config(),
-            recipient_recovery_public_key,
-            &hpke_info,
-            &[],
-            adk,
-        )
-        .map_err(|e| JsError::new(&format!("wrap ADK: {e:?}")))?;
-    Ok(HpkeWrappedArchiveDataKey {
-        kem_output: ct.kem_output.as_slice().to_vec(),
-        ciphertext: ct.ciphertext.as_slice().to_vec(),
-        ciphersuite: CIPHERSUITE.into(),
-        hpke_info,
-    })
+let core_info: openmls_recovery::ArchiveKeyWrapInfo = serde_json::from_slice(&info.to_bytes()?).map_err(|_| JsError::new("Invalid archive HPKE info"))?;
+let value = openmls_recovery::wrap_archive_data_key(&provider.0, adk, recipient_recovery_public_key, &core_info).map_err(core_error)?;
+Ok(HpkeWrappedArchiveDataKey { kem_output: value.kem_output, ciphertext: value.ciphertext, ciphersuite: value.ciphersuite, hpke_info: value.hpke_info })
 }
 
 #[wasm_bindgen]
@@ -437,21 +340,8 @@ pub fn unwrap_archive_data_key(
     recovery_private_key: &[u8],
     wrapped: &HpkeWrappedArchiveDataKey,
 ) -> Result<Vec<u8>, JsError> {
-    let ct = HpkeCiphertext {
-        kem_output: wrapped.kem_output.clone().into(),
-        ciphertext: wrapped.ciphertext.clone().into(),
-    };
-    provider
-        .0
-        .crypto()
-        .hpke_open(
-            CIPHERSUITE.hpke_config(),
-            &ct,
-            recovery_private_key,
-            &wrapped.hpke_info,
-            &[],
-        )
-        .map_err(|e| JsError::new(&format!("unwrap ADK: {e:?}")))
+let core_wrapped = openmls_recovery::HpkeWrappedArchiveDataKey::from_bytes(&wrapped.to_bytes()?).map_err(core_error)?;
+openmls_recovery::unwrap_archive_data_key(&provider.0, recovery_private_key, &core_wrapped).map_err(core_error)
 }
 
 #[wasm_bindgen]
@@ -462,13 +352,8 @@ pub fn unwrap_archive_data_key_from_parts(
     ciphertext: &[u8],
     hpke_info: &[u8],
 ) -> Result<Vec<u8>, JsError> {
-    let wrapped = HpkeWrappedArchiveDataKey {
-        kem_output: kem_output.to_vec(),
-        ciphertext: ciphertext.to_vec(),
-        ciphersuite: CIPHERSUITE.into(),
-        hpke_info: hpke_info.to_vec(),
-    };
-    unwrap_archive_data_key(provider, recovery_private_key, &wrapped)
+
+openmls_recovery::unwrap_archive_data_key_from_parts(&provider.0, recovery_private_key, kem_output, ciphertext, hpke_info).map_err(core_error)
 }
 
 fn validate_pin(pin: &str) -> Result<(), JsError> {
@@ -540,3 +425,5 @@ mod generation_tests {
         assert_eq!(wrap_json["group_generation"], 2);
     }
 }
+
+fn core_error(error: openmls_recovery::RecoveryError) -> JsError { JsError::new(&error.to_string()) }

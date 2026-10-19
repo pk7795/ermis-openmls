@@ -19,6 +19,7 @@ mod framing;
 mod framing_validation;
 mod group;
 mod group_context_extensions;
+mod join_lifetime_policy;
 mod key_package_in;
 mod past_secrets;
 mod proposal_validation;

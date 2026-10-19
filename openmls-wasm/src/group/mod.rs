@@ -11,11 +11,15 @@ mod commit;
 mod messaging;
 mod proposal;
 mod state;
+mod welcome_candidate;
+mod group_info_validation;
 
 pub use commit::*;
 pub use messaging::*;
 pub use proposal::*;
 pub use state::*;
+pub use welcome_candidate::*;
+pub use group_info_validation::*;
 
 use openmls::{
     framing::{MlsMessageBodyIn, MlsMessageIn},
@@ -26,10 +30,10 @@ use tls_codec::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 use crate::{
-    CIPHERSUITE, Provider,
     errors::{MlsError, MlsErrorCode},
     identity::Identity,
     types::RatchetTree,
+    Provider, CIPHERSUITE,
 };
 use openmls_traits::OpenMlsProvider;
 
@@ -67,12 +71,12 @@ impl Group {
         provider: &Provider,
         welcome: &[u8],
         ratchet_tree: Option<RatchetTree>,
+        allow_expired_tree_leaves: bool,
     ) -> Result<Group, MlsError> {
-        let mut welcome_slice = welcome;
-        let message = MlsMessageIn::tls_deserialize(&mut welcome_slice).map_err(|error| {
+        let message = MlsMessageIn::tls_deserialize_exact(welcome).map_err(|_| {
             MlsError::new(
                 MlsErrorCode::DeserializationError,
-                &format!("Welcome deserialization failed: {error}"),
+                "Welcome deserialization failed",
             )
         })?;
         let mls_welcome = match message.extract() {
@@ -91,9 +95,18 @@ impl Group {
             .sender_ratchet_configuration(SenderRatchetConfiguration::new(10, 2000))
             .build();
         let ratchet_tree_in = ratchet_tree.map(|tree| tree.0);
-        let staged =
-            StagedWelcome::new_from_welcome(&provider.0, &config, mls_welcome, ratchet_tree_in)
-                .map_err(MlsError::from_welcome_error)?;
+        let policy = if allow_expired_tree_leaves {
+            openmls::prelude::LeafNodeLifetimePolicy::AllowExpired
+        } else {
+            openmls::prelude::LeafNodeLifetimePolicy::Verify
+        };
+        let mut builder = StagedWelcome::build_from_welcome(&provider.0, &config, mls_welcome)
+            .map_err(MlsError::from_welcome_error)?
+            .lifetime_policy(policy);
+        if let Some(tree) = ratchet_tree_in {
+            builder = builder.with_ratchet_tree(tree);
+        }
+        let staged = builder.build().map_err(MlsError::from_welcome_error)?;
         let mls_group = staged
             .into_group(&provider.0)
             .map_err(MlsError::from_welcome_error)?;
@@ -204,7 +217,10 @@ impl Group {
 
     /// Create a new group (legacy API, uses group_id string directly)
     pub fn create_new(provider: &Provider, founder: &Identity, group_id: &str) -> Group {
-        Self::create_with_cid(provider, founder, group_id).unwrap()
+        match Self::create_with_cid(provider, founder, group_id) {
+            Ok(group) => group,
+            Err(_) => wasm_bindgen::throw_str("Legacy group creation failed"),
+        }
     }
 
     /// Join a group using a Welcome message
@@ -251,7 +267,23 @@ impl Group {
         welcome: &[u8],
         ratchet_tree: Option<RatchetTree>,
     ) -> Result<Group, MlsError> {
-        Self::join_with_welcome_typed_inner(provider, welcome, ratchet_tree)
+        Self::join_with_welcome_typed_inner(provider, welcome, ratchet_tree, false)
+    }
+
+    /// Opt-in checked AllowExpired for a Welcome tree. The caller mutates a
+    /// candidate provider and persists it before publishing the new group.
+    pub fn join_with_welcome_with_policy(
+        provider: &Provider,
+        welcome: &[u8],
+        ratchet_tree: Option<RatchetTree>,
+        allow_expired_tree_leaves: bool,
+    ) -> Result<Group, MlsError> {
+        Self::join_with_welcome_typed_inner(
+            provider,
+            welcome,
+            ratchet_tree,
+            allow_expired_tree_leaves,
+        )
     }
 
     /// Join a group using a Welcome (legacy API)
@@ -276,53 +308,96 @@ impl Group {
     ///
     /// # Returns
     /// ExternalJoinResult containing the joined group and commit message to broadcast
-    #[allow(deprecated)]
     pub fn join_external(
         provider: &Provider,
         identity: &Identity,
         group_info: &[u8],
         ratchet_tree: Option<RatchetTree>,
     ) -> Result<ExternalJoinResult, JsError> {
-        // group_info bytes are TLS-serialized MlsMessageOut (from export_group_info)
-        // → deserialize as MlsMessageIn first, then extract the GroupInfo body
-        let mut gi_slice = group_info;
-        let mls_message = MlsMessageIn::tls_deserialize(&mut gi_slice).map_err(|e| {
-            JsError::new(&format!("GroupInfo MlsMessage deserialization error: {e}"))
+        Self::join_external_with_policy(provider, identity, group_info, ratchet_tree, false)
+            .map_err(|error| JsError::new(&error.code_name()))
+    }
+
+    /// Typed opt-in expiry policy; caller uses a pending isolated provider and
+    /// waits for durable backend acceptance/checkpoints before publishing Ready.
+    pub fn join_external_with_policy(
+        provider: &Provider,
+        identity: &Identity,
+        group_info: &[u8],
+        ratchet_tree: Option<RatchetTree>,
+        allow_expired_tree_leaves: bool,
+    ) -> Result<ExternalJoinResult, MlsError> {
+        let message = MlsMessageIn::tls_deserialize_exact(group_info).map_err(|_| {
+            MlsError::new(
+                MlsErrorCode::DeserializationError,
+                "GroupInfo deserialization failed",
+            )
         })?;
-
-        let verified_group_info = match mls_message.extract() {
-            MlsMessageBodyIn::GroupInfo(gi) => Ok(gi),
-            other => Err(JsError::new(&format!(
-                "Expected GroupInfo message, got {:?}",
-                std::mem::discriminant(&other)
-            ))),
-        }?;
-
-        let ratchet_tree_in = ratchet_tree.map(|rt| rt.0);
-
-        let (mls_group, commit_msg, _group_info) = MlsGroup::join_by_external_commit(
-            &provider.0,
-            &identity.keypair,
-            ratchet_tree_in,
-            verified_group_info,
-            // Must match the config used in create_with_cid for consistency.
-            &MlsGroupJoinConfig::builder()
-                .use_ratchet_tree_extension(true)
-                .max_past_epochs(5)
-                .sender_ratchet_configuration(SenderRatchetConfiguration::new(10, 2000))
-                .build(),
-            None, // No capabilities
-            None, // No extra extensions
-            &[],  // Empty AAD
-            identity.credential_with_key.clone(),
-        )?;
-
-        let mut commit_bytes = vec![];
-        commit_msg.tls_serialize(&mut commit_bytes)?;
-
+        let gi = match message.extract() {
+            MlsMessageBodyIn::GroupInfo(gi) => gi,
+            _ => {
+                return Err(MlsError::new(
+                    MlsErrorCode::GroupInfoInvalid,
+                    "GroupInfo message required",
+                ))
+            }
+        };
+        let policy = if allow_expired_tree_leaves {
+            openmls::prelude::LeafNodeLifetimePolicy::AllowExpired
+        } else {
+            openmls::prelude::LeafNodeLifetimePolicy::Verify
+        };
+        let mut builder = MlsGroup::external_commit_builder()
+            .lifetime_policy(policy)
+            .with_config(
+                MlsGroupJoinConfig::builder()
+                    .use_ratchet_tree_extension(true)
+                    .max_past_epochs(5)
+                    .sender_ratchet_configuration(SenderRatchetConfiguration::new(10, 2000))
+                    .build(),
+            );
+        if let Some(tree) = ratchet_tree {
+            builder = builder.with_ratchet_tree(tree.0);
+        }
+        let (mls_group, bundle) = builder
+            .build_group(&provider.0, gi, identity.credential_with_key.clone())
+            .map_err(|error| {
+                let code = match error {
+                    openmls::prelude::ExternalCommitBuilderError::PublicGroupError(
+                        openmls::prelude::CreationFromExternalError::LeafNodeValidation(error),
+                    ) => MlsError::from_leaf_validation(error),
+                    openmls::prelude::ExternalCommitBuilderError::StorageError(_) => {
+                        MlsErrorCode::StorageError
+                    }
+                    _ => MlsErrorCode::GroupInfoInvalid,
+                };
+                MlsError::new(code, "External join validation failed")
+            })?
+            .load_psks(provider.0.storage())
+            .map_err(|_| MlsError::new(MlsErrorCode::CryptoError, "External join PSK unavailable"))?
+            .build(
+                provider.0.rand(),
+                provider.0.crypto(),
+                &identity.keypair,
+                |_| true,
+            )
+            .map_err(|_| {
+                MlsError::new(MlsErrorCode::ExternalCommitError, "External commit failed")
+            })?
+            .finalize(&provider.0)
+            .map_err(|_| {
+                MlsError::new(MlsErrorCode::StorageError, "External join storage failed")
+            })?;
+        let (commit, _, _) = bundle.into_contents();
+        let commit = commit.tls_serialize_detached().map_err(|_| {
+            MlsError::new(
+                MlsErrorCode::SerializationError,
+                "External commit serialization failed",
+            )
+        })?;
         Ok(ExternalJoinResult {
             group: Some(Group { mls_group }),
-            commit: commit_bytes,
+            commit,
         })
     }
 }

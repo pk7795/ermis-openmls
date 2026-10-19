@@ -12,6 +12,10 @@ pub mod group;
 pub mod identity;
 pub mod provider;
 pub mod types;
+pub mod recovery;
+pub mod recovery_journal;
+pub use recovery_journal::*;
+pub use recovery::*;
 
 pub use errors::*;
 pub use group::*;

@@ -7,25 +7,25 @@ use openmls_traits::types::VerifiableCiphersuite;
 
 use super::PublicGroup;
 use crate::extensions::RequiredCapabilitiesExtension;
-use crate::group::GroupContextExtensionsProposalValidationError;
 use crate::group::creation::LeafNodeLifetimePolicy;
 use crate::group::proposal_store::ProposalQueue;
+use crate::group::GroupContextExtensionsProposalValidationError;
 use crate::prelude::LibraryError;
-use crate::treesync::{LeafNode, errors::LeafNodeValidationError};
+use crate::treesync::{errors::LeafNodeValidationError, LeafNode};
 use crate::{
     binary_tree::array_representation::LeafNodeIndex,
     framing::{
-        ContentType, ProtocolMessage, Sender, WireFormat,
-        mls_auth_content_in::VerifiableAuthenticatedContentIn,
+        mls_auth_content_in::VerifiableAuthenticatedContentIn, ContentType, ProtocolMessage,
+        Sender, WireFormat,
     },
     group::{
-        Member,
         errors::{ExternalCommitValidationError, ProposalValidationError, ValidationError},
         past_secrets::MessageSecretsStore,
+        Member,
     },
     messages::{
-        Commit,
         proposals::{Proposal, ProposalOrRefType, ProposalType},
+        Commit,
     },
 };
 
@@ -800,6 +800,16 @@ impl PublicGroup {
         leaf_node: &crate::treesync::LeafNode,
         validate_lifetimes: LeafNodeLifetimePolicy,
     ) -> Result<(), LeafNodeValidationError> {
+        let operation_time = crate::key_packages::Lifetime::current_time();
+        self.validate_leaf_node_inner_at(leaf_node, validate_lifetimes, operation_time)
+    }
+
+    pub(crate) fn validate_leaf_node_inner_at(
+        &self,
+        leaf_node: &crate::treesync::LeafNode,
+        validate_lifetimes: LeafNodeLifetimePolicy,
+        operation_time: Option<u64>,
+    ) -> Result<(), LeafNodeValidationError> {
         // https://validation.openmls.tech/#valn0103
         // https://validation.openmls.tech/#valn0104
         // https://validation.openmls.tech/#valn0107
@@ -822,15 +832,36 @@ impl PublicGroup {
         //
         // Some KATs use key packages that are expired by now. In order to run these tests, we
         // provide a way to turn off this check.
-        if matches!(validate_lifetimes, LeafNodeLifetimePolicy::Verify)
-            && !crate::skip_validation::is_disabled::leaf_node_lifetime()
-        {
-            if let Some(lifetime) = leaf_node.life_time() {
-                if !lifetime.is_valid() {
-                    log::warn!(
-                        "offending lifetime: {lifetime:?} for leaf node with {credential:?}",
-                        credential = leaf_node.credential()
-                    );
+        if let Some(lifetime) = leaf_node.life_time() {
+            // Range is a structural invariant under every temporal policy.
+            let range = lifetime
+                .not_after()
+                .checked_sub(lifetime.not_before())
+                .filter(|range| *range > 0)
+                .ok_or(LeafNodeValidationError::Lifetime(
+                    LifetimeError::InvalidRange,
+                ))?;
+            if range > crate::key_packages::MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS {
+                return Err(LeafNodeValidationError::Lifetime(
+                    LifetimeError::RangeTooBig,
+                ));
+            }
+            if !matches!(validate_lifetimes, LeafNodeLifetimePolicy::Skip)
+                && !crate::skip_validation::is_disabled::leaf_node_lifetime()
+            {
+                let now = operation_time.ok_or(LeafNodeValidationError::Lifetime(
+                    LifetimeError::InvalidClock,
+                ))?;
+                if lifetime.not_before() >= now {
+                    log::warn!("leaf lifetime rejected: not_yet_valid");
+                    return Err(LeafNodeValidationError::Lifetime(
+                        LifetimeError::NotYetValid,
+                    ));
+                }
+                if matches!(validate_lifetimes, LeafNodeLifetimePolicy::Verify)
+                    && now >= lifetime.not_after()
+                {
+                    log::warn!("leaf lifetime rejected: expired");
                     return Err(LeafNodeValidationError::Lifetime(LifetimeError::NotCurrent));
                 }
             }

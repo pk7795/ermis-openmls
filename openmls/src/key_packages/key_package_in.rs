@@ -15,7 +15,7 @@ use tls_codec::{
 };
 
 use super::{
-    InitKey, KeyPackage, KeyPackageTbs, SIGNATURE_KEY_PACKAGE_LABEL, errors::KeyPackageVerifyError,
+    errors::KeyPackageVerifyError, InitKey, KeyPackage, KeyPackageTbs, SIGNATURE_KEY_PACKAGE_LABEL,
 };
 
 /// Selects the instant used to validate a KeyPackage lifetime.
@@ -219,6 +219,9 @@ impl KeyPackageIn {
 
         // Ensure validity of the life time extension in the leaf node.
         if let Some(life_time) = key_package.payload.leaf_node.life_time() {
+            if !life_time.has_acceptable_range() {
+                return Err(KeyPackageVerifyError::InvalidLifetimeRange);
+            }
             if !life_time.is_valid_for(lifetime_validation_time) {
                 return Err(KeyPackageVerifyError::InvalidLifetime);
             }
