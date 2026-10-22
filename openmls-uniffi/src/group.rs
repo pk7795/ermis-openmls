@@ -119,6 +119,30 @@ impl Group {
         self.inner.group_id()
     }
 
+    pub fn staged_external_commit_public_context_fingerprint(
+        &self, provider: Arc<Provider>, commit: Vec<u8>,
+    ) -> Result<Vec<u8>, MlsError> {
+        self.inner.staged_external_commit_public_context_fingerprint(provider.core(), commit).map_err(MlsError::from_core)
+    }
+
+    pub fn evicted_external_commit_public_context_fingerprint(
+        &self, provider: Arc<Provider>, commit: Vec<u8>, ratchet_tree: Vec<u8>, before_epoch: u64,
+    ) -> Result<Vec<u8>, MlsError> {
+        self.inner.evicted_external_commit_public_context_fingerprint(provider.core(), commit, ratchet_tree, before_epoch)
+            .map_err(MlsError::from_core)
+    }
+
+    pub fn process_evicted_epoch_application_deferred(
+        &self, provider: Arc<Provider>, msg: Vec<u8>, ratchet_tree: Vec<u8>, before_epoch: u64,
+    ) -> Result<ProcessedMessage, MlsError> {
+        Ok(self.inner.process_evicted_epoch_application_deferred(provider.core(), msg, ratchet_tree, before_epoch)
+            .map_err(MlsError::from_core)?.into())
+    }
+
+    pub fn public_context_fingerprint(&self) -> Result<Vec<u8>, MlsError> {
+        self.inner.public_context_fingerprint().map_err(MlsError::from_core)
+    }
+
     pub fn epoch(&self) -> u64 {
         self.inner.epoch()
     }

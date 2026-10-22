@@ -80,6 +80,13 @@ impl Identity {
             .map_err(MlsError::from_core)
     }
 
+    pub fn recover_key_package_upload(
+        &self, provider: Arc<Provider>, operation_id: String, scope: String,
+    ) -> Result<Option<Vec<Vec<u8>>>, MlsError> {
+        self.inner.recover_key_package_upload(provider.core(), operation_id, scope)
+            .map_err(MlsError::from_core)
+    }
+
     pub fn to_bytes(&self) -> Result<Vec<u8>, MlsError> {
         self.inner.to_bytes().map_err(MlsError::from_core)
     }

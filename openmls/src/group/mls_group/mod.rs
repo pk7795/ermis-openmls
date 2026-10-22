@@ -655,6 +655,12 @@ impl MlsGroup {
         self.public_group.proposal_store_mut()
     }
 
+    /// Public MLS context only; contains no epoch secrets or private key material.
+    /// Consumers must separately prove authorization and operation receipts.
+    pub fn public_group_context(&self) -> &GroupContext {
+        self.public_group.group_context()
+    }
+
     /// Get the group context
     pub(crate) fn context(&self) -> &GroupContext {
         self.public_group.group_context()

@@ -271,7 +271,10 @@ impl MlsGroup {
 
                 // Check if we were removed from the group
                 if apply_proposals_values.self_removed {
-                    // If so, we return here, because we can't decrypt the path
+                    // Removed members cannot decrypt the path or verify the new
+                    // confirmation tag, but the public context must still bind
+                    // this commit's confirmed transcript before it is exposed.
+                    diff.update_confirmed_transcript_hash(provider.crypto(), mls_content)?;
                     let staged_diff = diff.into_staged_diff(provider.crypto(), ciphersuite)?;
                     let staged_state = PublicStagedCommitState::new(
                         staged_diff,

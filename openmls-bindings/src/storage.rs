@@ -138,6 +138,23 @@ impl PersistentCryptoProvider {
         }
     }
 
+    /// Inspection may exercise MLS writes but must never persist them.
+    /// Return successful data only after proving the savepoint was rolled back.
+    pub(crate) fn inspect_rollback<T>(
+        &self,
+        action: impl FnOnce(&Self) -> crate::MlsResult<T>,
+    ) -> crate::MlsResult<T> {
+        if !self.available.get() { return Err(MlsError::StorageError); }
+        let conn = self.storage.connection();
+        conn.execute_batch("SAVEPOINT bindings_inspection").map_err(|_| MlsError::StorageError)?;
+        let result = action(self);
+        if conn.execute_batch("ROLLBACK TO bindings_inspection; RELEASE bindings_inspection").is_err() {
+            self.available.set(false);
+            return Err(MlsError::StorageError);
+        }
+        result
+    }
+
     fn decode_group_id_blob(blob: &[u8]) -> Result<String, String> {
         let group_id: GroupId =
             serde_json::from_slice(blob).map_err(|e| format!("Invalid group ID: {e}"))?;

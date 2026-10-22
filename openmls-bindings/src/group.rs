@@ -277,6 +277,111 @@ impl Group {
     }
 
     /// Export the ratchet tree
+    /// Fingerprint the complete public MLS branch, never a readiness/receipt proof.
+    /// Equal epoch and GroupId are deliberately insufficient for this comparison.
+    pub fn public_context_fingerprint(&self) -> crate::MlsResult<Vec<u8>> {
+        use sha2::{Digest, Sha256};
+        let group = self.lock_group();
+        if !group.is_active() || group.pending_commit().is_some() {
+            return Err(MlsError::InvalidState);
+        }
+        let encoded = group.public_group_context().tls_serialize_detached()
+            .map_err(|_| MlsError::SerializationError)?;
+        let mut hash = Sha256::new();
+        hash.update(b"ermis-lor-public-group-context-v1\0");
+        hash.update(encoded);
+        Ok(hash.finalize().to_vec())
+    }
+
+    /// Verify an external public commit on a separate handle, without changing
+    /// this group's operational state or any durable provider bytes.
+    pub fn staged_external_commit_public_context_fingerprint(
+        &self, provider: &Provider, commit: Vec<u8>,
+    ) -> crate::MlsResult<Vec<u8>> {
+        use sha2::{Digest, Sha256};
+        let group = self.lock_group();
+        if !group.is_active() || group.pending_commit().is_some() { return Err(MlsError::InvalidState); }
+        let group_id = group.group_id().clone();
+        let current_epoch = group.epoch();
+        let message = MlsMessageIn::tls_deserialize_exact(&commit).map_err(|_| MlsError::DeserializationError)?;
+        let public = match message.extract() {
+            MlsMessageBodyIn::PublicMessage(value) => value,
+            _ => return Err(MlsError::InvalidMessage),
+        };
+        let guard = provider.lock()?;
+        guard.inspect_rollback(|persistent| {
+            let mut inspection = MlsGroup::load(persistent.storage(), &group_id)
+                .map_err(|_| MlsError::StorageError)?.ok_or(MlsError::GroupNotFound)?;
+            if inspection.epoch() != current_epoch { return Err(MlsError::InvalidState); }
+            let processed = inspection.process_message_deferred(persistent, public)
+                .map_err(map_process_message_error)?;
+            if !matches!(processed.sender(), openmls::prelude::Sender::NewMemberCommit) {
+                return Err(MlsError::InvalidMessage);
+            }
+            let staged = match processed.into_content() {
+                openmls::framing::ProcessedMessageContent::StagedCommitMessage(value) => value,
+                _ => return Err(MlsError::InvalidMessage),
+            };
+            let encoded = staged.group_context().tls_serialize_detached().map_err(|_| MlsError::SerializationError)?;
+            let mut hash = Sha256::new();
+            hash.update(b"ermis-lor-public-group-context-v1\0"); hash.update(encoded);
+            Ok(hash.finalize().to_vec())
+        })
+    }
+
+    /// Verify the accepted commit against an already evicted provider's exact
+    /// native retained context and a tree whose root must match that context.
+    pub fn evicted_external_commit_public_context_fingerprint(
+        &self, provider: &Provider, commit: Vec<u8>, ratchet_tree: Vec<u8>, before_epoch: u64,
+    ) -> crate::MlsResult<Vec<u8>> {
+        use sha2::{Digest, Sha256};
+        if ratchet_tree.len() > 1_048_576 { return Err(MlsError::InvalidMessage); }
+        let group = self.lock_group();
+        let group_id = group.group_id().clone();
+        let message = MlsMessageIn::tls_deserialize_exact(&commit).map_err(|_| MlsError::DeserializationError)?;
+        let public = match message.extract() {
+            MlsMessageBodyIn::PublicMessage(value) => value,
+            _ => return Err(MlsError::InvalidMessage),
+        };
+        let tree = openmls::prelude::RatchetTreeIn::tls_deserialize_exact(&ratchet_tree).map_err(|_| MlsError::DeserializationError)?;
+        let guard = provider.lock()?;
+        guard.inspect_rollback(|persistent| {
+            let mut inspection = MlsGroup::load(persistent.storage(), &group_id)
+                .map_err(|_| MlsError::StorageError)?.ok_or(MlsError::GroupNotFound)?;
+            let processed = inspection.stage_external_commit_from_evicted_epoch(persistent, public, tree, before_epoch)
+                .map_err(map_process_message_error)?;
+            if !matches!(processed.sender(), openmls::prelude::Sender::NewMemberCommit) { return Err(MlsError::InvalidMessage); }
+            let staged = match processed.into_content() {
+                openmls::framing::ProcessedMessageContent::StagedCommitMessage(value) => value,
+                _ => return Err(MlsError::InvalidMessage),
+            };
+            let encoded = staged.group_context().tls_serialize_detached().map_err(|_| MlsError::SerializationError)?;
+            let mut hash = Sha256::new(); hash.update(b"ermis-lor-public-group-context-v1\0"); hash.update(encoded);
+            Ok(hash.finalize().to_vec())
+        })
+    }
+
+    /// Application-only historical decoding; no sending, handshake, reactivation
+    /// or durable secret update until the caller's ordinary save_state checkpoint.
+    pub fn process_evicted_epoch_application_deferred(
+        &self, provider: &Provider, msg: Vec<u8>, ratchet_tree: Vec<u8>, before_epoch: u64,
+    ) -> crate::MlsResult<ProcessedMessage> {
+        if ratchet_tree.len() > 1_048_576 { return Err(MlsError::InvalidMessage); }
+        let message = MlsMessageIn::tls_deserialize_exact(&msg).map_err(|_| MlsError::DeserializationError)?;
+        let private = match message.extract() { MlsMessageBodyIn::PrivateMessage(value) => value, _ => return Err(MlsError::InvalidMessage) };
+        let tree = openmls::prelude::RatchetTreeIn::tls_deserialize_exact(&ratchet_tree).map_err(|_| MlsError::DeserializationError)?;
+        let mut group = self.lock_group(); let guard = provider.lock()?;
+        let processed = group.process_evicted_epoch_application_deferred(&*guard, private, tree, before_epoch).map_err(map_process_message_error)?;
+        let epoch = processed.epoch().as_u64(); let aad = processed.aad().to_vec();
+        let sender_index = match processed.sender() { openmls::prelude::Sender::Member(index) => index.u32(), _ => return Err(MlsError::InvalidMessage) };
+        match processed.into_content() {
+            openmls::framing::ProcessedMessageContent::ApplicationMessage(value) => Ok(ProcessedMessage {
+                message_type: MessageType::ApplicationMessage, content: Some(value.into_bytes()), sender_index, epoch, aad,
+            }),
+            _ => Err(MlsError::InvalidMessage),
+        }
+    }
+
     pub fn export_ratchet_tree(&self) -> RatchetTree {
         let group = self.lock_group();
         RatchetTree {

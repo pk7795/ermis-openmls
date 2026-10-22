@@ -49,6 +49,62 @@ impl Provider {
 }
 
 impl Identity {
+    /// Read an existing exact batch for a legacy preparing obligation. Absence
+    /// never authorizes generation. This path neither creates tables nor writes.
+    pub fn recover_key_package_upload(
+        &self,
+        provider: &Provider,
+        operation_id: String,
+        scope: String,
+    ) -> crate::MlsResult<Option<Vec<Vec<u8>>>> {
+        if scope.len() != 64
+            || !scope.bytes().all(|c| c.is_ascii_hexdigit())
+            || operation_id.len() != 36
+            || operation_id.bytes().enumerate().any(|(i, c)| {
+                if [8, 13, 18, 23].contains(&i) {
+                    c != b'-'
+                } else {
+                    !c.is_ascii_hexdigit()
+                }
+            })
+        {
+            return Err(MlsError::SerializationError);
+        }
+        let guard = provider.lock()?;
+        let conn = guard.storage().connection();
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='openmls_upload_batches')",
+            [], |r| r.get(0),
+        ).map_err(|_| MlsError::StorageError)?;
+        if !exists {
+            return Ok(None);
+        }
+        type Saved = (i64, Vec<u8>, String, i64, Vec<u8>, Vec<u8>);
+        let saved: Option<Saved> = conn.query_row(
+            "SELECT version,signer,scope,count,payload,payload_sha256 FROM openmls_upload_batches WHERE operation_id=?1",
+            [operation_id.to_ascii_lowercase()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        ).optional().map_err(|_| MlsError::StorageError)?;
+        let Some((version, signer, saved_scope, count, payload, hash)) = saved else {
+            return Ok(None);
+        };
+        if version != 1 || signer != self.signature_public_key() || saved_scope != scope {
+            return Err(MlsError::InvalidState);
+        }
+        if !(1..=100).contains(&count)
+            || payload.len() > 3 * 1024 * 1024
+            || Sha256::digest(&payload).as_slice() != hash
+        {
+            return Err(MlsError::StorageCorruption);
+        }
+        let batch: Vec<Vec<u8>> =
+            serde_json::from_slice(&payload).map_err(|_| MlsError::StorageCorruption)?;
+        if batch.len() != count as usize || batch.iter().any(Vec::is_empty) {
+            return Err(MlsError::StorageCorruption);
+        }
+        Ok(Some(batch))
+    }
+
     /// Generate once or recover the immutable exact public batch. An absent
     /// journal authorizes generation only in the original bound native instance.
     pub fn prepare_key_package_upload(
@@ -146,6 +202,58 @@ mod tests {
         )
     }
     #[test]
+    fn legacy_recovery_is_read_only_exact_and_scope_bound() -> Result<(), Box<dyn Error>> {
+        let tmp = tempfile::tempdir()?;
+        let path = tmp.path().join("legacy.db");
+        let p = Provider::new_with_path(path.to_string_lossy().into())?;
+        let i = Identity::new(&p, "recipient".into())?;
+        p.store_identity(i.user_id(), i.to_bytes()?)?;
+        assert_eq!(i.recover_key_package_upload(&p, OP.into(), scope())?, None);
+        {
+            let guard = p.lock()?;
+            let conn = guard.storage().connection();
+            let count: i64 = conn.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name LIKE 'openmls_upload_%'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(count, 0);
+        }
+        let exact = prepare(&p, &i, 3)?;
+        assert_eq!(
+            i.recover_key_package_upload(&p, OP.to_uppercase(), scope())?,
+            Some(exact.clone())
+        );
+        assert!(i
+            .recover_key_package_upload(&p, OP.into(), "b".repeat(64))
+            .is_err());
+        let other = Identity::new(&p, "other".into())?;
+        assert!(other
+            .recover_key_package_upload(&p, OP.into(), scope())
+            .is_err());
+        drop(other);
+        drop(i);
+        drop(p);
+        let p = Provider::new_with_path(path.to_string_lossy().into())?;
+        let i = Identity::from_bytes(&p, p.load_identity()?.ok_or("missing identity")?)?;
+        assert_eq!(
+            i.recover_key_package_upload(&p, OP.into(), scope())?,
+            Some(exact)
+        );
+        let guard = p.lock()?;
+        let conn = guard.storage().connection();
+        conn.execute(
+            "UPDATE openmls_upload_batches SET payload_sha256=zeroblob(32)",
+            [],
+        )?;
+        drop(guard);
+        assert!(i
+            .recover_key_package_upload(&p, OP.into(), scope())
+            .is_err());
+        Ok(())
+    }
+
+    #[test]
     fn exact_batch_reopen_replay_and_consumed_package_is_never_regenerated(
     ) -> Result<(), Box<dyn Error>> {
         let tmp = tempfile::tempdir()?;
@@ -173,6 +281,10 @@ mod tests {
         let p = Provider::new_with_path(path.to_string_lossy().into())?;
         let i = Identity::from_bytes(&p, p.load_identity()?.ok_or("missing identity")?)?;
         assert_eq!(prepare(&p, &i, 3)?, batch);
+        assert_eq!(
+            i.recover_key_package_upload(&p, OP.into(), scope())?,
+            Some(batch)
+        );
         assert!(!i.owns_key_package_ref(&p, reference)?);
         assert!(prepare(&p, &i, 2).is_err());
         let different = Identity::new(&p, "other".into())?;

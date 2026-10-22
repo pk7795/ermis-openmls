@@ -193,6 +193,67 @@ impl MlsGroup {
         )
     }
 
+    // The old context remains inside retained MessageSecrets after eviction.
+    // Its authenticated tree root, rather than a received Welcome alone, binds
+    // the supplied public tree. Never persist or expose this operational view.
+    fn with_evicted_epoch_view<T>(
+        &mut self, crypto: &impl OpenMlsCrypto,
+        tree: crate::treesync::RatchetTreeIn, before_epoch: u64,
+        action: impl FnOnce(&mut Self) -> T,
+    ) -> Result<T, LibraryError> {
+        use tls_codec::Deserialize as _;
+        if !matches!(self.group_state, MlsGroupState::Inactive) || self.epoch().as_u64() != before_epoch {
+            return Err(LibraryError::custom("not an exact evicted epoch"));
+        }
+        let context = GroupContext::tls_deserialize_exact(self.message_secrets_store.message_secrets().serialized_context())
+            .map_err(|_| LibraryError::custom("retained context unavailable"))?;
+        if context.epoch().as_u64().checked_add(1) != Some(before_epoch) ||
+            context.group_id() != self.group_id() || context.ciphersuite() != self.ciphersuite() ||
+            context.protocol_version() != self.version() {
+            return Err(LibraryError::custom("retained context scope mismatch"));
+        }
+        let verified = tree.into_verified(context.ciphersuite(), crypto, context.group_id())
+            .map_err(|_| LibraryError::custom("retained tree signatures invalid"))?;
+        let tree = crate::treesync::TreeSync::from_ratchet_tree(crypto, context.ciphersuite(), verified)
+            .map_err(|_| LibraryError::custom("retained tree invalid"))?;
+        if tree.tree_hash() != context.tree_hash() {
+            return Err(LibraryError::custom("retained tree root mismatch"));
+        }
+        let tag = self.message_secrets_store.message_secrets().confirmation_key()
+            .tag(crypto, context.ciphersuite(), context.confirmed_transcript_hash())
+            .map_err(|_| LibraryError::custom("retained confirmation key unavailable"))?;
+        let historical = PublicGroup::new(crypto, tree, context, tag)?;
+        let original_public = mem::replace(&mut self.public_group, historical);
+        let original_state = mem::replace(&mut self.group_state, MlsGroupState::Operational);
+        let result = action(self);
+        self.public_group = original_public;
+        self.group_state = original_state;
+        Ok(result)
+    }
+
+    /// Stage a public external commit against the exact retained pre-eviction
+    /// context. The original inactive state is restored before returning.
+    pub fn stage_external_commit_from_evicted_epoch<Provider: OpenMlsProvider>(
+        &mut self, provider: &Provider, message: crate::framing::PublicMessageIn,
+        tree: crate::treesync::RatchetTreeIn, before_epoch: u64,
+    ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
+        self.with_evicted_epoch_view(provider.crypto(), tree, before_epoch,
+            |group| group.process_message_deferred(provider, message))?
+    }
+
+    /// Decrypt only historical application data using its retained private
+    /// ratchet. This never enables sending or applies a handshake after removal.
+    pub fn process_evicted_epoch_application_deferred<Provider: OpenMlsProvider>(
+        &mut self, provider: &Provider, message: crate::framing::PrivateMessageIn,
+        tree: crate::treesync::RatchetTreeIn, before_epoch: u64,
+    ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
+        if message.content_type() != ContentType::Application || message.epoch().as_u64() >= before_epoch {
+            return Err(LibraryError::custom("not a retained application message").into());
+        }
+        self.with_evicted_epoch_view(provider.crypto(), tree, before_epoch,
+            |group| group.process_message_deferred(provider, message))?
+    }
+
     fn process_message_with_secret_persistence<Provider: OpenMlsProvider>(
         &mut self,
         provider: &Provider,

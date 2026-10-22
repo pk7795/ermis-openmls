@@ -714,6 +714,39 @@ User login ──→ Provider.newWithPath("openmls_{userId}.db")
 
 A restart repeats this API with the same UUID/scope/count/provider. A committed journal replays exact bytes without re-generating or unconsuming bundles. An absent journal in the same bound database proves the atomic transaction did not commit and permits generation for that same operation only. A foreign provider, hash/truncation/version/signer/scope/count mismatch or uncertain storage fails closed. Existing error variants and previous APIs retain their ordering; this is an append-only UniFFI API addition. Public journal rows are retained (no garbage collection policy introduced); private bundles are never retired by journal recovery.
 
-The lazily added local tables `openmls_upload_provider` and `openmls_upload_batches` require no backend migration. Old ready/retry jobs retain their existing exact-body path. Old preparing jobs without native provider/count binding become `retained_legacy_preparing_unbound`: the original obligation is retained, replacement is blocked, and acceptance is not inferred from process death or absence of a public row. Autonomous recovery of such historical unbound jobs remains open until an authenticated disposition is available.
+The lazily added local tables `openmls_upload_provider` and `openmls_upload_batches` require no backend migration. Old ready/retry jobs retain their existing exact-body path. Old preparing jobs without native provider/count binding become `retained_legacy_preparing_unbound`: the original obligation is retained, replacement is blocked, and acceptance is not inferred from process death or absence of a public row. DEC085 adds `Identity.recover_key_package_upload(provider, operation_id, scope_sha256)`: a read-only keyed lookup of an existing native exact journal, validating UUID/signer/scope/version/count/hash and returning its immutable public bytes. It never creates tables, generates packages or infers rejection from an absent row. Mobile pipelines re-prove current private ownership and durably checkpoint ready before dispatch; previously retained legacy jobs may use the same lookup. Missing pre-v1 journal remains explicitly external-evidence-required and blocks replacement. Acceptance/consumption cannot be reconstructed from count or elapsed time. The [disposition runbook](../../bellboy/docs/mls_rollout_runbook.md#legacy-preparing-disposition-dec085) defines the unresolved closure condition.
 
 Binary rollback requires both the native journal reader and the SDK version-1 preparing/retained-status reader; disabling a runtime flag does not supply those readers. An older binary that ignores the obligation is not compatible rollback evidence. Local storage overhead is O(total retained public batch bytes); generation is O(batch count), one native transaction, no native mutex or storage transaction spans network/proof/auth waits. Verification and provenance: [canonical LOR journal](../../bellboy/docs/todo/e2ee_mls_lifetime_ownership_recovery_plan.md), [2026-10-19 run](../../.task-artifacts/qa/runs/20261019T020334Z-8dada8401e30/report.md).
+
+
+2026-10-19 DEC085 pending release capability: `public_context_fingerprint` and
+`staged_external_commit_public_context_fingerprint` are append-only native APIs.
+The first hashes full TLS public GroupContext with domain separation; it is not
+Ready or receipt proof. The second verifies an external public commit against a
+separately loaded native handle inside an always-rollback SQLite savepoint. It
+returns the staged context hash without merging or persisting receiver state.
+Never expose private provider/archive/key bytes for this comparison.
+Android accepted-candidate completion requires immutable exact receipt bindings;
+a concurrent Welcome can prove the same staged branch while retaining its old
+epoch provider. A v1 retained epoch boundary routes old ciphertext before native
+decrypt. Receipt proof, active provider/marker, boundary and pending removal share
+one durable preference commit. Unknown acceptance, fork, corrupt proof or missing
+boundary stays blocked. Existing Ready/retry/KP readers are unchanged, but a binary
+that ignores the new same-generation epoch boundaries is NOT a compatible rollback
+reader. No global minimum version or server flag is enabled. Final consumer/device
+verification and manifest provenance must follow the actual promoted artifact;
+see canonical DEC085 and run20261019T095248Z-8c705ce87a8d/report.md.
+
+### DEC085 already evicted provider: retained history contract
+
+<details>
+<summary>Change log</summary>
+
+- `2026-10-19`: Append `evicted_external_commit_public_context_fingerprint` and `process_evicted_epoch_application_deferred` to the paired native API.
+  - Reason: an older client can already have persisted removal of its own previous leaf while its exact accepted candidate remains pending.
+  - Integrator action: supply the historical public ratchet tree and exact eviction epoch. Native binds the tree root to the previous GroupContext inside retained MessageSecrets, verifies tree signatures/parent hashes, and temporarily uses that old view only for external-commit proof or historical application decryption. Public inactive state is restored before return; normal sends/handshakes remain forbidden. Save successful deferred history ratchet changes only through the existing exact application journal checkpoint.
+  - Compatibility/default: no backend schema/wire contract or native error-order change. Optional Android `retainedWelcomeTree`/`retainedWelcomeCursor` and `evictedWelcomeTree` fields preserve existing rows. Missing private context/tree proof remains blocked. Old binaries lacking these readers/APIs are not qualified rollback artifacts.
+
+</details>
+
+The accepted isolated candidate still requires immutable receipt scope/UUID/commit/GI binding and full resulting GroupContext equality. Public-tree lookup uses authenticated history reads, at most3 pages of100 per invocation with durable continuation; it does not change the application cursor or infer applied status from a received Welcome. Account-owned30s continuation revalidates the exact durable operation and current scope on wake. Retain the evicted provider, all journals/receipts/history and the exact pending body until atomic completion; no re-join, unconsume, secret export, provider purge or silent queued re-encryption is permitted. Retained decoding costs O(tree nodes + ciphertext bytes) per call plus normal signature/ratchet work, with a1MiB public-tree cap. Final artifact and physical/app verification are recorded in canonical DEC085; a successful producer build alone is insufficient.

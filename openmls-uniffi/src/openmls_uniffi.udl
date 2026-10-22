@@ -166,6 +166,9 @@ interface Identity {
 
     [Throws=MlsError]
     sequence<bytes> prepare_key_package_upload(Provider provider, string operation_id, string scope, string expected_provider_id, u32 count);
+
+    [Throws=MlsError]
+    sequence<bytes>? recover_key_package_upload(Provider provider, string operation_id, string scope);
 };
 
 interface KeyPackage {
@@ -215,6 +218,14 @@ interface Group {
     [Throws=MlsError]
     string cid();
     bytes group_id();
+    [Throws=MlsError]
+    bytes public_context_fingerprint();
+    [Throws=MlsError]
+    bytes staged_external_commit_public_context_fingerprint(Provider provider, bytes commit);
+    [Throws=MlsError]
+    bytes evicted_external_commit_public_context_fingerprint(Provider provider, bytes commit, bytes ratchet_tree, u64 before_epoch);
+    [Throws=MlsError]
+    ProcessedMessage process_evicted_epoch_application_deferred(Provider provider, bytes msg, bytes ratchet_tree, u64 before_epoch);
     u64 epoch();
     sequence<MemberInfo> members();
     MemberInfo? member_by_user_id(string user_id);
